@@ -1,0 +1,32 @@
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnp/
+.pnp.js
+.pnp.cjs
+
+# Cloudflare
+.wrangler/
+.dev.vars
+.dev.vars.*
+dist/
+build/
+package/
+wrangler.local.toml
+
+# Environment Variables
+.env
+.env.*
+
+# Editor · IDE · OS · LLMs
+.vscode/
+.idea/
+*.swp
+*.bak
+*.swo
+.DS_Store
+.claude/
+CLAUDE.md
+GEMINI.md
