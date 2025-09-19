@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ladder</title>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+
+<body class="antialiased text-slate-500 dark:text-slate-400 bg-white dark:bg-slate-900">
+    <div class="grid grid-cols-1 gap-4 max-w-3xl mx-auto pt-10">
+        <img id="logo" src="/logo.svg" style="height: 175px; width: auto; display: block; margin: 0 auto;" alt="Ladder Logo" />
+        <header>
+            <h1 class="text-center text-3xl sm:text-4xl font-extrabold text-slate-900 tracking-tight dark:text-slate-200">Ladder</h1>
+        </header>
+        <form id="inputForm" method="get" class="mx-4 relative">
+            <div>
+                <input type="url" id="inputField" placeholder="Proxy Search" name="inputField" class="w-full text-base leading-6 text-slate-400 rounded-md ring-1 ring-slate-900/10 shadow-sm py-1.5 pl-2 pr-3 hover:ring-slate-300 dark:bg-slate-800 dark:highlight-white/5 dark:hover:bg-slate-700" required autofocus>
+                <button id="clearButton" type="button" aria-label="Clear Search" title="Clear Search" class="hidden absolute inset-y-0 right-0 items-center pr-2 hover:text-slate-400 hover:dark:text-slate-300" tabindex="-1">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                </button>
+            </div>
+        </form>
+                <footer class="mt-10 mx-4 text-center text-slate-600 dark:text-slate-400">
+            <div style="display: flex; gap: 2rem; justify-content: center; margin-bottom: 2rem; flex-wrap: wrap;">
+                <p id="apple-shortcut" style="margin: 0; font-size: 1.00rem;">
+                <a href="https://www.icloud.com/shortcuts/f596e509ca644429bacb395002716326" class="hover:text-blue-500 hover:underline underline-offset-2 transition-colors duration-300" style="display: flex; flex-direction: column; justify-content: center;">
+                    <img id="share-icon" style="height: 1.75rem;     margin-bottom: 0.0rem;" alt="share icon" src="data:image/svg+xml,%3Csvg version='1.1' xmlns='http://www.w3.org/2000/svg' viewBox='0 0 11.3984 16.4297'%3E%3Cg%3E%3Cpath fill='%23F38020' d='M10.9922 6.89844L10.9922 12.8984C10.9922 14.2109 10.3359 14.8594 9 14.8594L1.99219 14.8594C0.664062 14.8594 0 14.2109 0 12.8984L0 6.89844C0 5.58594 0.664062 4.9375 1.99219 4.9375L3.71094 4.9375L3.71094 6.0625L2.00781 6.0625C1.44531 6.0625 1.125 6.36719 1.125 6.96094L1.125 12.8359C1.125 13.4297 1.44531 13.7344 2.00781 13.7344L8.98438 13.7344C9.53906 13.7344 9.86719 13.4297 9.86719 12.8359L9.86719 6.96094C9.86719 6.36719 9.53906 6.0625 8.98438 6.0625L7.27344 6.0625L7.27344 4.9375L9 4.9375C10.3359 4.9375 10.9922 5.59375 10.9922 6.89844Z'/%3E%3Cpath fill='%23F38020' d='M5.49219 10.0156C5.79688 10.0156 6.05469 9.77344 6.05469 9.47656L6.05469 3.39844L6.00781 2.46094L6.32031 2.79688L7.17969 3.73438C7.28125 3.85156 7.42188 3.89844 7.5625 3.89844C7.85156 3.89844 8.07031 3.69531 8.07031 3.41406C8.07031 3.26562 8.00781 3.14844 7.90625 3.04688L5.89844 1.13281C5.75781 0.984375 5.64062 0.945312 5.49219 0.945312C5.35156 0.945312 5.23438 0.984375 5.08594 1.13281L3.08594 3.04688C2.97656 3.14844 2.92188 3.26562 2.92188 3.41406C2.92188 3.69531 3.13281 3.89844 3.42188 3.89844C3.55469 3.89844 3.71094 3.85156 3.80469 3.73438L4.67188 2.79688L4.98438 2.46094L4.9375 3.39844L4.9375 9.47656C4.9375 9.77344 5.19531 10.0156 5.49219 10.0156Z'/%3E%3C/g%3E%3C/svg%3E" />
+                    <nobr>add Apple Shortcut</nobr>
+                </a>
+                </p>
+                <p id="bookmarklet" style="margin: 0; font-size: 1.00rem;">
+                <a href="javascript:window.location.href='https://'+window.location.host+'/'+location.href" class="hover:text-blue-500 hover:underline underline-offset-2 transition-colors duration-300" style="display: flex; flex-direction: column; justify-content: center;">
+                    <img id="bookmark-icon" style="height: 1.5rem;   margin-bottom: 0.25rem;" alt="bookmark icon" src="data:image/svg+xml,%3Csvg version='1.1' xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8.82031 13.3203'%3E%3Cg%3E%3Cpath fill='%23F38020' d='M0.710938 13.2969C1.03906 13.2969 1.23438 13.1016 1.875 12.4844L4.14844 10.2812C4.17969 10.25 4.24219 10.25 4.26562 10.2812L6.53906 12.4844C7.1875 13.1016 7.375 13.2969 7.71094 13.2969C8.15625 13.2969 8.41406 13 8.41406 12.4766L8.41406 1.82031C8.41406 0.609375 7.8125 0 6.61719 0L1.79688 0C0.601562 0 0 0.609375 0 1.82031L0 12.4766C0 13 0.257812 13.2969 0.710938 13.2969ZM1.28125 11.3828C1.19531 11.4609 1.10156 11.4375 1.10156 11.3203L1.10156 1.83594C1.10156 1.35156 1.35938 1.10156 1.85156 1.10156L6.5625 1.10156C7.05469 1.10156 7.3125 1.35156 7.3125 1.83594L7.3125 11.3203C7.3125 11.4375 7.21875 11.4609 7.14062 11.3828L4.5625 8.9375C4.34375 8.72656 4.07031 8.72656 3.85156 8.9375Z'/%3E%3C/g%3E%3C/svg%3E" />
+                    <nobr>save bookmarklet</nobr>
+                </a>
+                </p>
+            </div>
+            <p id="source" style="margin-bottom: 2rem; font-size: 0.90rem;">
+                <a href="https://github.com/everywall/ladder" class="hover:text-blue-500 hover:underline underline-offset-2 transition-colors duration-300">everywall/ladder</a> · <a href="https://github.com/andesco/ladderflare" class="hover:text-blue-500 hover:underline underline-offset-2 transition-colors duration-300">andesco/ladderflare</a>
+            </p>
+        </footer>
+    </div>
+
+    <script>
+        document.getElementById('inputForm').addEventListener('submit', function (e) {
+            e.preventDefault();
+            let url = document.getElementById('inputField').value;
+            if (url.indexOf('http') === -1) {
+                url = 'https://' + url;
+            }
+            window.location.href = '/' + url;
+            return false;
+        });
+        document.getElementById('inputField').addEventListener('input', function() {
+            const clearButton = document.getElementById('clearButton');
+            if (this.value.trim().length > 0) {
+                clearButton.style.display = 'block';
+            } else {
+                clearButton.style.display = 'none';
+            }
+        });
+        document.getElementById('clearButton').addEventListener('click', function() {
+            document.getElementById('inputField').value = '';
+            this.style.display = 'none';
+            document.getElementById('inputField').focus();
+        });
+    </script>
+
+    <style>
+        @media (prefers-color-scheme: light) {
+            body {
+                background-color: #ffffff;
+                color: #333333;
+            }
+        }
+
+        @media (prefers-color-scheme: dark) {
+            body {
+                background-color: #1a202c;
+                color: #ffffff;
+            }
+        }
+    </style>
+</body>
+
+</html>
