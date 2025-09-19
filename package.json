@@ -1,0 +1,28 @@
+{
+	"name": "ladder",
+	"version": "0.0.1",
+	"description": "Ladderflare – Ladder-based HTTP proxy for bypassing web barriers",
+	"main": "index.js",
+		"scripts": {
+		"build:rules": "node scripts/build-rules.js",
+		"build:wasm": "bash scripts/build-wasm.sh",
+		"build": "npm run build:rules && npm run build:wasm",
+		"deploy": "wrangler deploy",
+		"deploy:local": "wrangler deploy --config wrangler.local.toml",
+		"dev": "wrangler dev",
+		"dev:local": "wrangler dev --local --config wrangler.local.toml"
+	},
+	"author": "Andrew Escobar",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/andesco/ladder/ladderflare"
+	},
+	"engines": {
+		"node": ">=16.0.0"
+	},
+	"devDependencies": {
+		"wrangler": "^4.36.0",
+		"yaml": "^2.3.4"
+	}
+}
