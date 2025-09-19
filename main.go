@@ -7,6 +7,9 @@ import (
 	"regexp"
 	"strings"
 	"syscall/js"
+
+	"github.com/PuerkitoBio/goquery"
+	"gopkg.in/yaml.v3"
 )
 
 //go:embed ruleset.yaml
@@ -15,47 +18,48 @@ var embeddedRuleset string
 var (
 	UserAgent    = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
 	ForwardedFor = "66.249.66.1"
-	parsedRules  []Rule
+	parsedRules  RuleSet
 )
 
-// Simple rule structures for WASM (without YAML dependency)
+// Full-featured rule structures with yaml.v3 support (matching ladder/pkg/ruleset)
+type Regex struct {
+	Match   string `yaml:"match"`
+	Replace string `yaml:"replace"`
+}
+
+type KV struct {
+	Key   string `yaml:"key"`
+	Value string `yaml:"value"`
+}
+
+type RuleSet []Rule
+
 type Rule struct {
-	Domain    string
-	Domains   []string
-	Headers   RuleHeaders
-	Injections []Injection
-	RegexRules []RegexRule
-	URLMods   URLModifications
-	GoogleCache bool
-}
+	Domain  string   `yaml:"domain,omitempty"`
+	Domains []string `yaml:"domains,omitempty"`
+	Paths   []string `yaml:"paths,omitempty"`
+	Headers struct {
+		UserAgent     string `yaml:"user-agent,omitempty"`
+		XForwardedFor string `yaml:"x-forwarded-for,omitempty"`
+		Referer       string `yaml:"referer,omitempty"`
+		Cookie        string `yaml:"cookie,omitempty"`
+		CSP           string `yaml:"content-security-policy,omitempty"`
+	} `yaml:"headers,omitempty"`
+	GoogleCache bool    `yaml:"googleCache,omitempty"`
+	RegexRules  []Regex `yaml:"regexRules,omitempty"`
 
-type RuleHeaders struct {
-	UserAgent     string
-	XForwardedFor string
-	Referer       string
-	Cookie        string
-	CSP           string
-}
+	URLMods struct {
+		Domain []Regex `yaml:"domain,omitempty"`
+		Path   []Regex `yaml:"path,omitempty"`
+		Query  []KV    `yaml:"query,omitempty"`
+	} `yaml:"urlMods,omitempty"`
 
-type Injection struct {
-	Position string
-	Append   string
-	Prepend  string
-	Replace  string
-}
-
-type RegexRule struct {
-	Match   string
-	Replace string
-}
-
-type URLModifications struct {
-	Query []QueryMod
-}
-
-type QueryMod struct {
-	Key   string
-	Value string
+	Injections []struct {
+		Position string `yaml:"position,omitempty"`
+		Append   string `yaml:"append,omitempty"`
+		Prepend  string `yaml:"prepend,omitempty"`
+		Replace  string `yaml:"replace,omitempty"`
+	} `yaml:"injections,omitempty"`
 }
 
 func main() {
@@ -218,8 +222,78 @@ func fetchURL(this js.Value, args []js.Value) interface{} {
 	return result
 }
 
-// rewriteHTML rewrites HTML content to proxy relative URLs
+// rewriteHTML rewrites HTML content to proxy relative URLs using GoQuery
 func rewriteHTML(body, originalHost string) string {
+	// Parse HTML with GoQuery
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(body))
+	if err != nil {
+		// Fallback to string-based rewriting if parsing fails
+		return rewriteHTMLFallback(body, originalHost)
+	}
+
+	proxyPrefix := "/https://" + originalHost + "/"
+
+	// Rewrite image sources
+	doc.Find("img[src]").Each(func(i int, s *goquery.Selection) {
+		src, exists := s.Attr("src")
+		if exists && strings.HasPrefix(src, "/") && !strings.HasPrefix(src, "//") {
+			s.SetAttr("src", proxyPrefix+strings.TrimPrefix(src, "/"))
+		}
+	})
+
+	// Rewrite script sources
+	doc.Find("script[src]").Each(func(i int, s *goquery.Selection) {
+		src, exists := s.Attr("src")
+		if exists && strings.HasPrefix(src, "/") && !strings.HasPrefix(src, "//") {
+			s.SetAttr("src", proxyPrefix+strings.TrimPrefix(src, "/"))
+		}
+	})
+
+	// Rewrite link hrefs
+	doc.Find("a[href]").Each(func(i int, s *goquery.Selection) {
+		href, exists := s.Attr("href")
+		if exists {
+			if strings.HasPrefix(href, "/") && !strings.HasPrefix(href, "//") {
+				s.SetAttr("href", proxyPrefix+strings.TrimPrefix(href, "/"))
+			} else if strings.HasPrefix(href, "https://"+originalHost) {
+				// Convert absolute URLs back to proxy format
+				s.SetAttr("href", "/https://"+originalHost+"/"+strings.TrimPrefix(href, "https://"+originalHost+"/"))
+			}
+		}
+	})
+
+	// Rewrite link rel=stylesheet hrefs
+	doc.Find("link[href]").Each(func(i int, s *goquery.Selection) {
+		href, exists := s.Attr("href")
+		if exists && strings.HasPrefix(href, "/") && !strings.HasPrefix(href, "//") {
+			s.SetAttr("href", proxyPrefix+strings.TrimPrefix(href, "/"))
+		}
+	})
+
+	// Rewrite form actions
+	doc.Find("form[action]").Each(func(i int, s *goquery.Selection) {
+		action, exists := s.Attr("action")
+		if exists && strings.HasPrefix(action, "/") && !strings.HasPrefix(action, "//") {
+			s.SetAttr("action", proxyPrefix+strings.TrimPrefix(action, "/"))
+		}
+	})
+
+	// Get the modified HTML
+	html, err := doc.Html()
+	if err != nil {
+		// Fallback to string-based rewriting if serialization fails
+		return rewriteHTMLFallback(body, originalHost)
+	}
+
+	// Still need to handle CSS url() rewrites with string replacement since GoQuery doesn't parse CSS
+	html = strings.ReplaceAll(html, `url('/`, `url('`+proxyPrefix)
+	html = strings.ReplaceAll(html, `url(/`, `url(`+proxyPrefix)
+
+	return html
+}
+
+// rewriteHTMLFallback provides string-based rewriting as fallback
+func rewriteHTMLFallback(body, originalHost string) string {
 	// Rewrite relative URLs to go through proxy
 	proxyPrefix := "/https://" + originalHost + "/"
 
@@ -305,7 +379,7 @@ func getRulesetDomains(this js.Value, args []js.Value) interface{} {
 	return domains
 }
 
-// processContent applies content modifications (injections + regex rules)
+// processContent applies content modifications (injections + regex rules) using GoQuery
 func processContent(this js.Value, args []js.Value) interface{} {
 	if len(args) < 2 {
 		return createErrorResponse(400, "Content and URL required")
@@ -314,14 +388,14 @@ func processContent(this js.Value, args []js.Value) interface{} {
 	content := args[0].String()
 	targetURL := args[1].String()
 
-	// Parse URL to get domain
+	// Parse URL to get domain and path
 	parsedURL, err := url.Parse(targetURL)
 	if err != nil {
 		return createErrorResponse(400, fmt.Sprintf("Invalid URL: %s", err.Error()))
 	}
 
-	// Find matching rule
-	rule := findRuleForDomain(parsedURL.Host)
+	// Find matching rule with path support
+	rule := findRuleForDomainAndPath(parsedURL.Host, parsedURL.Path)
 
 	// Apply regex rules first
 	for _, regexRule := range rule.RegexRules {
@@ -336,23 +410,12 @@ func processContent(this js.Value, args []js.Value) interface{} {
 	// Apply HTML rewriting
 	content = rewriteHTML(content, parsedURL.Host)
 
-	// Create result with processed content and injection info
+	// Apply content injections using GoQuery
+	content = applyContentInjections(content, rule.Injections)
+
+	// Create result with processed content
 	result := js.Global().Get("Object").New()
 	result.Set("content", content)
-
-	// Add injections for JavaScript to apply
-	if len(rule.Injections) > 0 {
-		injections := js.Global().Get("Array").New()
-		for i, injection := range rule.Injections {
-			inj := js.Global().Get("Object").New()
-			inj.Set("position", injection.Position)
-			inj.Set("append", injection.Append)
-			inj.Set("prepend", injection.Prepend)
-			inj.Set("replace", injection.Replace)
-			injections.SetIndex(i, inj)
-		}
-		result.Set("injections", injections)
-	}
 
 	if rule.Headers.CSP != "" {
 		result.Set("csp", rule.Headers.CSP)
@@ -361,179 +424,170 @@ func processContent(this js.Value, args []js.Value) interface{} {
 	return result
 }
 
-// parseRuleset parses the embedded YAML ruleset (simplified parser)
+// applyContentInjections applies content injections using GoQuery for DOM manipulation
+func applyContentInjections(content string, injections []struct {
+	Position string `yaml:"position,omitempty"`
+	Append   string `yaml:"append,omitempty"`
+	Prepend  string `yaml:"prepend,omitempty"`
+	Replace  string `yaml:"replace,omitempty"`
+}) string {
+	if len(injections) == 0 {
+		return content
+	}
+
+	// Parse HTML with GoQuery
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(content))
+	if err != nil {
+		// Fallback to simple string injection if parsing fails
+		return applyContentInjectionsStringFallback(content, injections)
+	}
+
+	for _, injection := range injections {
+		// Determine target selector and content
+		targetSelector := "head"
+		injectionContent := ""
+
+		// Determine content to inject
+		if injection.Append != "" {
+			injectionContent = injection.Append
+		} else if injection.Prepend != "" {
+			injectionContent = injection.Prepend
+		} else if injection.Replace != "" {
+			injectionContent = injection.Replace
+		}
+
+		// Determine target based on position
+		switch injection.Position {
+		case "head":
+			targetSelector = "head"
+		case "body":
+			targetSelector = "body"
+		case "html":
+			targetSelector = "html"
+		default:
+			// If position looks like a CSS selector, use it directly
+			if strings.Contains(injection.Position, ".") || strings.Contains(injection.Position, "#") || strings.Contains(injection.Position, "[") {
+				targetSelector = injection.Position
+			} else {
+				targetSelector = "head" // Default fallback
+			}
+		}
+
+		// Apply the injection
+		target := doc.Find(targetSelector)
+		if target.Length() > 0 {
+			if injection.Replace != "" {
+				// Replace content
+				target.SetHtml(injectionContent)
+			} else if injection.Prepend != "" {
+				// Prepend content
+				target.PrependHtml(injectionContent)
+			} else {
+				// Default to append
+				target.AppendHtml(injectionContent)
+			}
+		} else {
+			// If target not found, try fallback to head
+			headTarget := doc.Find("head")
+			if headTarget.Length() > 0 {
+				headTarget.AppendHtml(injectionContent)
+			}
+		}
+	}
+
+	// Get the modified HTML
+	html, err := doc.Html()
+	if err != nil {
+		// Fallback to string injection if serialization fails
+		return applyContentInjectionsStringFallback(content, injections)
+	}
+
+	return html
+}
+
+// applyContentInjectionsStringFallback provides string-based injection as fallback
+func applyContentInjectionsStringFallback(content string, injections []struct {
+	Position string `yaml:"position,omitempty"`
+	Append   string `yaml:"append,omitempty"`
+	Prepend  string `yaml:"prepend,omitempty"`
+	Replace  string `yaml:"replace,omitempty"`
+}) string {
+	for _, injection := range injections {
+		injectionContent := ""
+		if injection.Append != "" {
+			injectionContent = injection.Append
+		} else if injection.Prepend != "" {
+			injectionContent = injection.Prepend
+		} else if injection.Replace != "" {
+			injectionContent = injection.Replace
+		}
+
+		// Simple string-based injection
+		switch injection.Position {
+		case "head":
+			content = strings.Replace(content, "</head>", injectionContent+"\n</head>", 1)
+		case "body":
+			content = strings.Replace(content, "</body>", injectionContent+"\n</body>", 1)
+		default:
+			// Default to head
+			content = strings.Replace(content, "</head>", injectionContent+"\n</head>", 1)
+		}
+	}
+	return content
+}
+
+// parseRuleset parses the embedded YAML ruleset using yaml.v3
 func parseRuleset() {
-	lines := strings.Split(embeddedRuleset, "\n")
-	var currentRule *Rule
-	var currentInjection *Injection
-	var inInjectionContent bool
-	var injectionContent strings.Builder
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-
-		// Skip empty lines and comments
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-
-		// New rule starts with "- domain:" or "- domains:"
-		if strings.HasPrefix(trimmed, "- domain:") {
-			if currentRule != nil {
-				parsedRules = append(parsedRules, *currentRule)
-			}
-			currentRule = &Rule{}
-			domain := strings.TrimSpace(strings.TrimPrefix(trimmed, "- domain:"))
-			currentRule.Domain = domain
-		} else if strings.HasPrefix(trimmed, "- domains:") {
-			if currentRule != nil {
-				parsedRules = append(parsedRules, *currentRule)
-			}
-			currentRule = &Rule{}
-		} else if currentRule != nil {
-			// Parse rule properties
-			if strings.HasPrefix(trimmed, "- ") && strings.Contains(line, "domains:") {
-				// Skip domains list marker
-				continue
-			} else if strings.HasPrefix(line, "  - ") && currentRule.Domain == "" {
-				// Domain in domains list
-				domain := strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
-				currentRule.Domains = append(currentRule.Domains, domain)
-			} else if strings.Contains(trimmed, "headers:") {
-				// Headers section
-				continue
-			} else if strings.Contains(trimmed, "user-agent:") || strings.Contains(trimmed, "ueser-agent:") { // Handle typo in ruleset
-				value := extractValue(trimmed, "user-agent:", "ueser-agent:")
-				currentRule.Headers.UserAgent = value
-			} else if strings.Contains(trimmed, "x-forwarded-for:") {
-				currentRule.Headers.XForwardedFor = extractValue(trimmed, "x-forwarded-for:")
-			} else if strings.Contains(trimmed, "referer:") {
-				currentRule.Headers.Referer = extractValue(trimmed, "referer:")
-			} else if strings.Contains(trimmed, "cookie:") {
-				currentRule.Headers.Cookie = extractValue(trimmed, "cookie:")
-			} else if strings.Contains(trimmed, "content-security-policy:") {
-				currentRule.Headers.CSP = extractValue(trimmed, "content-security-policy:")
-			} else if strings.Contains(trimmed, "googleCache:") {
-				currentRule.GoogleCache = strings.Contains(trimmed, "true")
-			} else if strings.Contains(trimmed, "urlMods:") {
-				// Start URL modifications section
-				continue
-			} else if strings.Contains(trimmed, "query:") && strings.HasPrefix(line, "    ") {
-				// URL modifications query section
-				continue
-			} else if strings.Contains(trimmed, "- key:") && strings.HasPrefix(line, "      ") {
-				// New query modification
-				queryMod := QueryMod{
-					Key: extractValue(trimmed, "key:"),
-				}
-				currentRule.URLMods.Query = append(currentRule.URLMods.Query, queryMod)
-			} else if strings.Contains(trimmed, "value:") && strings.HasPrefix(line, "        ") && len(currentRule.URLMods.Query) > 0 {
-				// Update last query mod with value
-				lastIdx := len(currentRule.URLMods.Query) - 1
-				currentRule.URLMods.Query[lastIdx].Value = extractValue(trimmed, "value:")
-			} else if strings.Contains(trimmed, "injections:") {
-				// Start injections section
-				continue
-			} else if strings.Contains(trimmed, "- position:") {
-				// New injection
-				if currentInjection != nil {
-					if inInjectionContent {
-						// Finish previous injection content
-						setInjectionContent(currentInjection, injectionContent.String())
-						injectionContent.Reset()
-						inInjectionContent = false
-					}
-					currentRule.Injections = append(currentRule.Injections, *currentInjection)
-				}
-				currentInjection = &Injection{}
-				currentInjection.Position = extractValue(trimmed, "position:")
-			} else if currentInjection != nil && strings.Contains(trimmed, "append:") {
-				if strings.Contains(trimmed, "|") {
-					// Multi-line content starts
-					inInjectionContent = true
-					injectionContent.Reset()
-				} else {
-					currentInjection.Append = extractValue(trimmed, "append:")
-				}
-			} else if currentInjection != nil && strings.Contains(trimmed, "prepend:") {
-				currentInjection.Prepend = extractValue(trimmed, "prepend:")
-			} else if currentInjection != nil && strings.Contains(trimmed, "replace:") {
-				currentInjection.Replace = extractValue(trimmed, "replace:")
-			} else if inInjectionContent && currentInjection != nil {
-				// Collect multi-line injection content
-				if strings.HasPrefix(line, "      ") { // 6 spaces for injection content
-					content := strings.TrimPrefix(line, "      ")
-					injectionContent.WriteString(content + "\n")
-				} else {
-					// End of injection content
-					setInjectionContent(currentInjection, injectionContent.String())
-					injectionContent.Reset()
-					inInjectionContent = false
-					currentRule.Injections = append(currentRule.Injections, *currentInjection)
-					currentInjection = nil
-				}
-			} else if strings.Contains(trimmed, "regexRules:") {
-				// Start regex rules section
-				continue
-			} else if strings.Contains(trimmed, "- match:") {
-				// New regex rule
-				regexRule := RegexRule{
-					Match: extractValue(trimmed, "match:"),
-				}
-				currentRule.RegexRules = append(currentRule.RegexRules, regexRule)
-			} else if strings.Contains(trimmed, "replace:") && len(currentRule.RegexRules) > 0 {
-				// Update last regex rule with replace value
-				lastIdx := len(currentRule.RegexRules) - 1
-				currentRule.RegexRules[lastIdx].Replace = extractValue(trimmed, "replace:")
-			}
-		}
+	err := yaml.Unmarshal([]byte(embeddedRuleset), &parsedRules)
+	if err != nil {
+		fmt.Printf("Error parsing YAML ruleset: %v\n", err)
+		return
 	}
-
-	// Add the last rule
-	if currentRule != nil {
-		if currentInjection != nil {
-			if inInjectionContent {
-				setInjectionContent(currentInjection, injectionContent.String())
-			}
-			currentRule.Injections = append(currentRule.Injections, *currentInjection)
-		}
-		parsedRules = append(parsedRules, *currentRule)
-	}
+	fmt.Printf("Successfully parsed %d rules from embedded YAML\n", len(parsedRules))
 }
 
-// Helper function to extract value after colon
-func extractValue(line string, keys ...string) string {
-	for _, key := range keys {
-		if idx := strings.Index(line, key); idx != -1 {
-			value := strings.TrimSpace(line[idx+len(key):])
-			// Remove quotes if present
-			if len(value) > 1 && ((value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'')) {
-				value = value[1 : len(value)-1]
-			}
-			return value
-		}
-	}
-	return ""
-}
 
-// Helper function to set injection content based on type
-func setInjectionContent(injection *Injection, content string) {
-	content = strings.TrimSpace(content)
-	if injection.Append == "" && injection.Prepend == "" && injection.Replace == "" {
-		injection.Append = content // Default to append
-	}
-}
-
-// findRuleForDomain finds the matching rule for a given domain
+// findRuleForDomain finds the matching rule for a given domain and path
 func findRuleForDomain(domain string) Rule {
+	return findRuleForDomainAndPath(domain, "")
+}
+
+// findRuleForDomainAndPath finds the matching rule for a given domain and path
+func findRuleForDomainAndPath(domain, path string) Rule {
 	for _, rule := range parsedRules {
 		// Check single domain
 		if rule.Domain != "" && (rule.Domain == domain || strings.HasSuffix(domain, "."+rule.Domain)) {
+			// Check path restrictions if present
+			if len(rule.Paths) > 0 {
+				matchesPath := false
+				for _, rulePath := range rule.Paths {
+					if strings.HasPrefix(path, rulePath) {
+						matchesPath = true
+						break
+					}
+				}
+				if !matchesPath {
+					continue
+				}
+			}
 			return rule
 		}
 		// Check domains list
 		for _, ruleDomain := range rule.Domains {
 			if ruleDomain == domain || strings.HasSuffix(domain, "."+ruleDomain) {
+				// Check path restrictions if present
+				if len(rule.Paths) > 0 {
+					matchesPath := false
+					for _, rulePath := range rule.Paths {
+						if strings.HasPrefix(path, rulePath) {
+							matchesPath = true
+							break
+						}
+					}
+					if !matchesPath {
+						continue
+					}
+				}
 				return rule
 			}
 		}
@@ -543,13 +597,31 @@ func findRuleForDomain(domain string) Rule {
 
 // applyURLModifications applies URL modifications from rules
 func applyURLModifications(targetURL string, rule Rule) string {
-	if len(rule.URLMods.Query) == 0 && !rule.GoogleCache {
+	if len(rule.URLMods.Query) == 0 && len(rule.URLMods.Domain) == 0 && len(rule.URLMods.Path) == 0 && !rule.GoogleCache {
 		return targetURL
 	}
 
 	parsedURL, err := url.Parse(targetURL)
 	if err != nil {
 		return targetURL
+	}
+
+	// Apply domain modifications
+	for _, domainMod := range rule.URLMods.Domain {
+		re, err := regexp.Compile(domainMod.Match)
+		if err != nil {
+			continue
+		}
+		parsedURL.Host = re.ReplaceAllString(parsedURL.Host, domainMod.Replace)
+	}
+
+	// Apply path modifications
+	for _, pathMod := range rule.URLMods.Path {
+		re, err := regexp.Compile(pathMod.Match)
+		if err != nil {
+			continue
+		}
+		parsedURL.Path = re.ReplaceAllString(parsedURL.Path, pathMod.Replace)
 	}
 
 	// Apply query modifications
