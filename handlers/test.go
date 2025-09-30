@@ -1,7 +1,11 @@
 package handlers
 
 import (
+	"encoding/json"
 	"fmt"
+	"math/rand"
+	"net/http"
+	"time"
 )
 
 // TestResult represents a single test result
@@ -19,7 +23,7 @@ type TestResponse struct {
 	Results []TestResult `json:"results"`
 }
 
-// HandleTest redirects to a random test URL for actual proxy testing
+// HandleTest redirects to a random test URL from removepaywalls.com
 func HandleTest(method, path string, headers map[string]string) map[string]interface{} {
 	if method != "GET" {
 		return createResponse(405, "Method Not Allowed", map[string]string{
@@ -27,37 +31,49 @@ func HandleTest(method, path string, headers map[string]string) map[string]inter
 		})
 	}
 
-	if rulesSet == nil {
-		return createResponse(500, "Ruleset not initialized", map[string]string{
+	// Generate random date within last 30 days
+	now := time.Now()
+	randomDaysAgo := rand.Intn(30) + 1 // 1-30 days ago
+	randomDate := now.AddDate(0, 0, -randomDaysAgo)
+	dateStr := randomDate.Format("20060102") // YYYYMMDD format
+
+	// Fetch URLs from removepaywalls.com API
+	apiURL := fmt.Sprintf("https://removepaywalls.com/top/top_%s.json", dateStr)
+
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	resp, err := client.Get(apiURL)
+	if err != nil {
+		return createResponse(500, fmt.Sprintf("Failed to fetch test URLs: %s", err.Error()), map[string]string{
+			"Content-Type": "text/plain",
+		})
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return createResponse(500, fmt.Sprintf("API returned status %d for date %s", resp.StatusCode, dateStr), map[string]string{
 			"Content-Type": "text/plain",
 		})
 	}
 
-	// Get test URLs from the ruleset
-	testURLs := rulesSet.GetTestURLs()
-
-	if len(testURLs) == 0 {
-		return createResponse(404, "No test URLs available", map[string]string{
+	// Parse JSON response
+	var urls []string
+	if err := json.NewDecoder(resp.Body).Decode(&urls); err != nil {
+		return createResponse(500, fmt.Sprintf("Failed to parse JSON response: %s", err.Error()), map[string]string{
 			"Content-Type": "text/plain",
 		})
 	}
 
-	// Filter valid test URLs (check domain restrictions)
-	var validURLs []string
-	for _, testURL := range testURLs {
-		if err := validateDomain(testURL); err == nil {
-			validURLs = append(validURLs, testURL)
-		}
-	}
-
-	if len(validURLs) == 0 {
-		return createResponse(403, "No test URLs allowed by domain restrictions", map[string]string{
+	if len(urls) == 0 {
+		return createResponse(404, fmt.Sprintf("No URLs available for date %s", dateStr), map[string]string{
 			"Content-Type": "text/plain",
 		})
 	}
 
-	// Select the first valid test URL (could be randomized later)
-	selectedURL := validURLs[0]
+	// Select random URL
+	selectedURL := urls[rand.Intn(len(urls))]
 
 	// Create redirect response to proxy the test URL
 	redirectLocation := "/" + selectedURL
@@ -73,9 +89,9 @@ func HandleTest(method, path string, headers map[string]string) map[string]inter
     <p>Redirecting to test URL: <a href="%s">%s</a></p>
     <p>If you are not redirected automatically, <a href="%s">click here</a>.</p>
     <hr>
-    <p><small>Available test URLs: %d | Selected: %s</small></p>
+    <p><small>Date: %s | Available URLs: %d | Selected: %s</small></p>
 </body>
-</html>`, redirectLocation, redirectLocation, selectedURL, redirectLocation, len(validURLs), selectedURL), map[string]string{
+</html>`, redirectLocation, redirectLocation, selectedURL, redirectLocation, dateStr, len(urls), selectedURL), map[string]string{
 		"Content-Type": "text/html; charset=utf-8",
 		"Location":     redirectLocation,
 	})

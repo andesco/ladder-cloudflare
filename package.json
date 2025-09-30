@@ -4,9 +4,9 @@
 	"description": "Ladderflare – Ladder-based HTTP proxy for bypassing web barriers",
 	"main": "index.js",
 		"scripts": {
-		"build:rules": "node scripts/build-rules.js",
 		"build:wasm": "bash scripts/build-wasm.sh",
-		"build": "npm run build:rules && npm run build:wasm",
+		"build": "npm run build:wasm",
+		"update-rules": "node scripts/update-rules.js",
 		"deploy": "wrangler deploy",
 		"deploy:local": "wrangler deploy --config wrangler.local.toml",
 		"dev": "wrangler dev",

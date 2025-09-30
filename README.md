@@ -16,19 +16,21 @@ embeds domain-specific bypass rules from [`ladder-rules`][ladder-rules] at build
 4. **updated interface**: \
 `index.html` and `styles.css` serve an updated web interface
 5. **edge deployment**:\
-the complete package is deployed to Cloudflare Workers with support for the user-friendly [Deploy to Cloudflare](https://deploy.workers.cloudflare.com/?url=https://github.com/andesco/ladderflare) option
+the complete package is deployed to Cloudflare Workers with support for the user-friendly [Deploy to Cloudflare](https://deploy.workers.cloudflare.com/?url=https://github.com/andesco/ladderflare) option
 
 The result is a **fast bypass proxy** that successfully circumvents many web restrictions through sophisticated rule-based processing.
 
 
-## Deploy to Cloudflare
+## Deploy to Cloudflare
 
 ### Cloudflare Dashboard
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/andesco/ladderflare)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/andesco/ladderflare)
 
 <nobr>Workers & Pages</nobr> ⇢ Create an application ⇢ [Clone a repository](https://dash.cloudflare.com/?to=/:account/workers-and-pages/create/deploy-to-workers): \
-   `http://github.com/andesco/ladderflare`
+   ```
+   http://github.com/andesco/ladderflare
+   ```
 
 ### Wrangler CLI
    
@@ -54,27 +56,46 @@ Add a shortcut to the share sheet on macOS and iOS: \
 [`andesco/ladder-shortcut`][ladder-shortcut]
 
 
-## Configuration
+### Required Environment Variable: `RULESET_URL`
 
-The worker is configured using environment variables. Set these in `wrangler.toml` file or in the Cloudflare Dashboard:
+- **`RULESET_URL`**
+    - remote ruleset URL pointing to manifest.json: \
+      <b>`https://`&zwj;`[…]`&zwj;`/manifest.json`</b>
 
-- **`USERPASS`** `{username}:{password}`
-- **`DISABLE_FORM`** `false`
-- **`USER_AGENT`** `Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)`
-- **`X_FORWARDED_FOR`** `66.249.66.1`
-- **`EXPOSE_RULESET`** `true`
-- **`ALLOWED_DOMAINS`** `{domain},{domain}`
-- **`ALLOWED_DOMAINS_RULESET`** `false`
+### Optional Secrets and Environment Variables
 
-> [!NOTE]
-> `ALLOWED_DOMAINS` and `ALLOWED_DOMAINS_RULESET` are joined together. If both are empty, no limitations are applied.
+- `USERNAME` & `PASSWORD`
+   - enable basic https authentication: \
+      `wrangler secret put PASSWORD` \
+      `wrangler secret put USERNAME`
+      
+- `DISABLE_FORM` - Disable web form interface
+   - default: `false` · form enabled
 
-Ladderflare does not support these legacy variables:
+- `USER_AGENT`
+   - custom user agent for proxied requests
+   - default: `Mozilla/5.0`&zwj;`[…]`&zwj;`Googlebot`&zwj;`[…]`
 
-- `FORM_PATH`
-- `LOG_URLS`
-- `PORT`
-- `RULESET`
+- `X_FORWARDED_FOR`
+   - custom IP for `X-Forwarded-For` header
+   - default: `66.249.66.1`
+
+- `ALLOWED_DOMAINS`
+   - limits domains to those listed in ruleset
+   - default: `false` · any domain allowed
+
+
+### KV Namespaces · <small>`optional`</small>
+
+Set these in `wrangler.toml` under `[[kv_namespaces]]`:
+  
+`ANALYTICS_KV`
+- usage analytics and rate limiting
+- create: `wrangler kv:namespace create "analytics"`
+  
+`CACHE_KV`
+- content caching for faster responses
+- create: `wrangler kv:namespace create "cache"`
 
 > [!IMPORTANT]
 > Ladderflare does not log fetched URLs. Consider enabling Cloudflare Analytics to log usage.
@@ -95,7 +116,7 @@ npm run deploy
 
 ### WebAssembly Implementation
 
-- **no dependencies**: Go stdlib compilation for minimal WASM binary size (3.0MB)
+- **no dependencies**: Go stdlib compilation for minimal WASM binary size
 - **custom YAML parser**: simplified parser avoids heavy dependencies in WASM
 - **JavaScript interoperability**: `syscall/js` bridge for fetch() and DOM manipulation
 - **edge optimization**: Cloudflare Workers-specific optimizations for performance
@@ -121,8 +142,6 @@ npm run deploy
 - **API**: `curl -X GET "ladder.{subdomain}.workers.dev/api/{URL}"`
 
 - **RAW:** `ladder.{subdomain}.workers.dev/raw/{URL}`
-
-- **RULESET**: `ladder.{subdomain}.workers.dev/ruleset`
 
 &zwnj;
 

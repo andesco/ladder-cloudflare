@@ -30,3 +30,12 @@ wrangler.local.toml
 .claude/
 CLAUDE.md
 GEMINI.md
+
+# Project
+refactor.md
+test-urls.txt
+sites*.yaml
+sites*.json
+public/sites.json
+ruleset.yaml
+sites.js
