@@ -1,14 +1,19 @@
 # Rule Format
 
 ## Overview
-This document defines the rule format used in the aggregated ruleset files (`sites_aggregated.json` and `sites_aggregated.yaml`). Rules control how the proxy handles requests to bypass web content restrictions. The documentation and example rules below contain **example-only** domains, services, CSS selectors, DOM selectors, etc.
+This document defines the rule format used in the aggregated ruleset files: `sites_aggregated.json` and `sites_aggregated.yaml`.
+
+Rules control how the proxy handles requests to bypass and block web content restrictions.
+
+> [!Note]
+> The documentation and example rules below contain **example-only** domains, services, CSS selectors, DOM selectors, etc.
 
 ## Rule Structure
 
 ### Basic Properties
 ```yaml
 - domain: "example.com"    # primary domain for this rule
-  upd_version: "4.3.2.1"   # optional: Rule version identifier
+  upd_version: "4.3.2.1"   # optional: rule version identifier
 ```
 
 ### Domain Groups
@@ -24,7 +29,8 @@ Groups allow multiple domains to share the same ruleset. During rule expansion, 
   block_regex: \.tracking\.com\/
 ```
 
-**Note:** During processing, this expands to individual rules for each domain while preserving all other properties.
+> [!Note]
+> During processing, this expands to individual rules for each domain while preserving all other properties.
 
 ### Cookie Management
 ```yaml
@@ -68,7 +74,7 @@ Examples:
 ```
 
 ### Content Script Actions · DOM Manipulation
-The `cs_code` field contains JSON-encoded array of DOM manipulation actions:
+The `cs_code` field contains `JSON`-encoded array of DOM manipulation actions:
 ```yaml
   cs_code: '[{"hide_elem":"div.restriction-banner"}]'
   cs_code: '[{"cond":"div.restricted", "rm_class":"restricted"}]'
@@ -98,8 +104,8 @@ Complex Example:
   ld_archive_is: 1  # load directly from archive.is
 ```
 
-### JSON-LD · Structured Data Extraction
-Extract article content from JSON-LD structured data:
+### `JSON-LD` · Structured Data Extraction
+Extract article content from `JSON-LD` structured data:
 
 ```yaml
   ld_json: "div.restriction|div.article" # replace selectors with JSON-LD content
@@ -193,8 +199,8 @@ lists of strings: `group`, `remove_cookies_select_drop`, `remove_cookies_select_
 #### Objects
 key-value pairs for custom HTTP headers: `headers_custom`
 
-#### JSON Strings
-JSON-encoded strings (structured data array) for DOM manipulation actions: `cs_code`
+#### `JSON` Strings
+`JSON`-encoded strings (structured data array) for DOM manipulation actions: `cs_code`
 
 > [!Important]
 > `cs_code` field must be valid `JSON`, even when embedded in `YAML`. Use single quotes or `>-` for multiline strings.
@@ -213,9 +219,10 @@ This can result in a single aggregated ruleset in `JSON` and/or `YAML`:
 * `sites_aggregated.json`
 * `sites_aggregated.yaml`
 
-## Regex Pattern Format · </small>`IMPORTANT`</small>
+## Regex Pattern Format
 
-Regex patterns in `block_regex` are written **without** surrounding slashes:
+> [!Important]
+> Regex patterns in `block_regex` are written **without** surrounding slashes:
 
 **correct:** `\.restriction\.com\/api\/`
 
@@ -223,7 +230,7 @@ Regex patterns in `block_regex` are written **without** surrounding slashes:
 
 Patterns should be properly escaped for YAML/JSON:
 - use `\.` for literal dots
-- use `\/` for literal slashes (though optional in JSON)
+- use `\/` for literal slashes (optional in `JSON`)
 - use `\\` for backslash escaping when needed
 
 ## Processing Notes
@@ -234,6 +241,6 @@ Patterns should be properly escaped for YAML/JSON:
 
 3. **Numeric Booleans:** Most boolean flags use `1` for true and `0` (or omission) for false.
 
-4. **Content Scripts:** The `cs_code` field must be valid JSON, even when embedded in YAML. Use single quotes or `>-` for multiline strings.
+4. **Content Scripts:** The `cs_code` field must be valid `JSON`, even when embedded in YAML. Use single quotes or `>-` for multiline strings.
 
 5. **Regex Validation:** Regex patterns are used directly without modification; ensure they are valid for the target environment.
