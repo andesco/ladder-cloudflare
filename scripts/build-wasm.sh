@@ -4,12 +4,6 @@ set -e
 
 echo "Building Ladderflare WASM..."
 
-# Ensure we have the ruleset
-if [ ! -f "ruleset.yaml" ]; then
-    echo "Error: ruleset.yaml not found. Run 'npm run build:rules' first."
-    exit 1
-fi
-
 # Set environment variables for WASM compilation
 export GOOS=js
 export GOARCH=wasm
