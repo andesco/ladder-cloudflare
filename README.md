@@ -1,25 +1,22 @@
 <p align="center">
-    <img src="public/logo.svg" width="100px">
+    <img src="public/ladder.svg" width="100px">
 </p>
 
 <h1 align="center">Ladderflare</h1>
 
-[Ladder][ladder] is a HTTP web proxy designed to bypass web restrictions through sophisticated header spoofing, content modification, and [rule-based processing][ladder-rules].
+[Ladderflare][ladderflare] is a web proxy designed to bypass web restrictions through sophisticated header rewrites, content modification, and rules-based processing. It was initially built as a serverless implementation of [Ladder][ladder].
 
-[Ladderflare][ladderflare] is a complete implementation of Ladder as a serverless application:
+1. **rule processing**: \
+applies domain-specific bypass rules: UA/referer, cookie controls, regex, AMP redirects, JSON-LD extraction, and archive fallback
+2. **ruleset refresh**: \
+pulls `manifest.json`, prefers `sites_aggregated.json` (YAML fallback), and refreshes on cron
+3. **WebAssembly**: \
+compiles Go proxy logic into WebAssembly (WASM) for browser/edge execution (embedded ruleset snapshot)
+4. **JavaScript bridge**: `index.js` provides fetch() integration and manages communication between WASM and Cloudflare Workers platform
+5. **serverless edge deployment**:\
+deployed as a Cloudflare Worker with support for the user-friendly [Deploy to Cloudflare](https://deploy.workers.cloudflare.com/?url=https://github.com/andesco/ladderflare)
 
-1. **WebAssembly**: \
-compiles Go proxy logic from [`ladder`][ladder] into WebAssembly (WASM) for browser/edge execution
-2. **rule processing**: \
-embeds domain-specific bypass rules from [`ladder-rules`][ladder-rules] at build-time
-3. **JavaScript bridge**: `index.js` provides fetch() integration and manages  communication between WASM and Cloudflare Workers platform
-4. **updated interface**: \
-`index.html` and `styles.css` serve an updated web interface
-5. **edge deployment**:\
-the complete package is deployed to Cloudflare Workers with support for the user-friendly [Deploy to Cloudflare](https://deploy.workers.cloudflare.com/?url=https://github.com/andesco/ladderflare) option
-
-The result is a **fast bypass proxy** that successfully circumvents many web restrictions through sophisticated rule-based processing.
-
+The result is a **fast bypass proxy** that successfully circumvents many web restrictions.
 
 ## Deploy to Cloudflare
 
@@ -106,8 +103,7 @@ Set these in `wrangler.toml` under `[[kv_namespaces]]`:
 ### Build Commands
 
 ```bash
-npm run build:rules   # download latest ruleset from ladder-rules repository
-npm run build:wasm    # compile WebAssembly binary
+npm run build:wasm    # compile WebAssembly binary with embedded sites_aggregated.yaml
 npm run build
 npm run dev:local     # deploy locally using wrangler.local.toml
 npm run deploy:local  # deploy using wrangler.local.toml
@@ -116,14 +112,13 @@ npm run deploy
 
 ### WebAssembly Implementation
 
-- **no dependencies**: Go stdlib compilation for minimal WASM binary size
-- **custom YAML parser**: simplified parser avoids heavy dependencies in WASM
+- **minimal dependencies**: small Go binary with yaml parsing
 - **JavaScript interoperability**: `syscall/js` bridge for fetch() and DOM manipulation
 - **edge optimization**: Cloudflare Workers-specific optimizations for performance
 
 ### WebAssembly Build Process
 
-1. `ruleset.yaml` downloaded from [`everywall/ladder-rules`][ladder-rules]
+1. `sites_aggregated.yaml` stored in this repo
 2. `GOOS=js GOARCH=wasm go build -ldflags="-s -w" -tags=wasm`
 3. `go:embed` embedds rules directly into WASM binary
 
@@ -138,10 +133,8 @@ npm run deploy
 ### Endpoints
 
 - **TEST**: `ladder.{subdomain}.workers.dev/test`
-
-- **API**: `curl -X GET "ladder.{subdomain}.workers.dev/api/{URL}"`
-
-- **RAW:** `ladder.{subdomain}.workers.dev/raw/{URL}`
+- **HEALTH**: `ladder.{subdomain}.workers.dev/health`
+- **API**: `/api/stats`, `/api/system`, `/api/metrics`, `/api/rules/*`
 
 &zwnj;
 
