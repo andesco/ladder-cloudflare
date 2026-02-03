@@ -30,10 +30,11 @@ type Manifest struct {
 }
 
 var (
-	UserAgent    = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
-	ForwardedFor = "66.249.66.1"
-	parsedRules  RuleSet
-	regexCache   = make(map[string]*regexp.Regexp)
+	UserAgent      = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+	ForwardedFor   = "66.249.66.1"
+	parsedRules    RuleSet
+	regexCache     = make(map[string]*regexp.Regexp)
+	rulesetRawText string
 )
 
 // Full-featured rule structures with yaml.v3 support (matching ladder/pkg/ruleset)
@@ -60,38 +61,38 @@ type Rule struct {
 	Name    string   `yaml:"name,omitempty"`
 	Domain  string   `yaml:"domain,omitempty"`
 	Domains []string `yaml:"domains,omitempty"`
-	Group   []string `yaml:"group,omitempty"`   // For grouped sites (when domain is ###_prefix)
+	Group   []string `yaml:"group,omitempty"` // For grouped sites (when domain is ###_prefix)
 	Paths   []string `yaml:"paths,omitempty"`
 
 	// Cookie management
-	AllowCookies              bool     `yaml:"allow_cookies,omitempty"`
-	RemoveCookies             bool     `yaml:"remove_cookies,omitempty"`
-	RemoveCookiesSelectHold   []string `yaml:"remove_cookies_select_hold,omitempty"`
-	RemoveCookiesSelectDrop   []string `yaml:"remove_cookies_select_drop,omitempty"`
+	AllowCookies            bool     `yaml:"allow_cookies,omitempty"`
+	RemoveCookies           bool     `yaml:"remove_cookies,omitempty"`
+	RemoveCookiesSelectHold []string `yaml:"remove_cookies_select_hold,omitempty"`
+	RemoveCookiesSelectDrop []string `yaml:"remove_cookies_select_drop,omitempty"`
 
 	// Request blocking
 	BlockRegex string `yaml:"block_regex,omitempty"`
 
 	// Headers and user agent
 	Headers struct {
-		UserAgent        string `yaml:"user_agent,omitempty"`
-		UserAgentCustom  string `yaml:"user_agent_custom,omitempty"`
-		XForwardedFor    string `yaml:"x-forwarded-for,omitempty"`
-		Referer          string `yaml:"referer,omitempty"`
-		RefererCustom    string `yaml:"referer_custom,omitempty"`
-		Cookie           string `yaml:"cookie,omitempty"`
-		CSP              string `yaml:"content-security-policy,omitempty"`
-		Accept           string `yaml:"accept,omitempty"`
-		AcceptLanguage   string `yaml:"accept-language,omitempty"`
-		AcceptEncoding   string `yaml:"accept-encoding,omitempty"`
-		Authorization    string `yaml:"authorization,omitempty"`
-		XRealIP          string `yaml:"x-real-ip,omitempty"`
-		XRequestedWith   string `yaml:"x-requested-with,omitempty"`
+		UserAgent       string `yaml:"user_agent,omitempty"`
+		UserAgentCustom string `yaml:"user_agent_custom,omitempty"`
+		XForwardedFor   string `yaml:"x-forwarded-for,omitempty"`
+		Referer         string `yaml:"referer,omitempty"`
+		RefererCustom   string `yaml:"referer_custom,omitempty"`
+		Cookie          string `yaml:"cookie,omitempty"`
+		CSP             string `yaml:"content-security-policy,omitempty"`
+		Accept          string `yaml:"accept,omitempty"`
+		AcceptLanguage  string `yaml:"accept-language,omitempty"`
+		AcceptEncoding  string `yaml:"accept-encoding,omitempty"`
+		Authorization   string `yaml:"authorization,omitempty"`
+		XRealIP         string `yaml:"x-real-ip,omitempty"`
+		XRequestedWith  string `yaml:"x-requested-with,omitempty"`
 	} `yaml:"headers,omitempty"`
 
 	// Archive/fallback sources
-	GoogleCache  bool `yaml:"googleCache,omitempty"`
-	CsDompurify  bool `yaml:"cs_dompurify,omitempty"`
+	GoogleCache bool `yaml:"googleCache,omitempty"`
+	CsDompurify bool `yaml:"cs_dompurify,omitempty"`
 
 	// Content processing
 	RegexRules     []Regex         `yaml:"regexRules,omitempty"`
@@ -126,18 +127,8 @@ func main() {
 		ForwardedFor = forwardedForEnv.String()
 	}
 
-	// Check for RULESET_URL and try to fetch remote ruleset, otherwise use embedded
-	if rulesetURLEnv := js.Global().Get("RULESET_URL"); !rulesetURLEnv.IsUndefined() {
-		rulesetURL := rulesetURLEnv.String()
-		fmt.Printf("RULESET_URL found: %s\n", rulesetURL)
-		if !fetchRemoteRuleset(rulesetURL) {
-			fmt.Println("Failed to fetch remote ruleset, falling back to embedded")
-			parseEmbeddedRuleset()
-		}
-	} else {
-		// Parse embedded ruleset
-		parseEmbeddedRuleset()
-	}
+	// Parse embedded ruleset. Remote rules are loaded in JavaScript to avoid CPU limits during WASM init.
+	parseEmbeddedRuleset()
 
 	// Keep references to prevent garbage collection
 	var handleRequestFunc = js.FuncOf(handleRequest)
@@ -264,7 +255,7 @@ func fetchURL(this js.Value, args []js.Value) interface{} {
 	} else if rule.Headers.Referer == "none" {
 		// Don't set referer when explicitly set to "none"
 	} else {
-		result.Set("referer", parsedURL.Scheme + "://" + parsedURL.Host)
+		result.Set("referer", parsedURL.Scheme+"://"+parsedURL.Host)
 	}
 
 	if rule.Headers.XForwardedFor != "" {
@@ -436,8 +427,8 @@ func rewriteHTMLFallback(body, originalHost string) string {
 		path := strings.TrimPrefix(strings.TrimSuffix(match, `"`), `href="/`)
 		// Skip if it's a resource file (already handled above)
 		if strings.Contains(path, ".css") || strings.Contains(path, ".js") ||
-		   strings.Contains(path, ".woff") || strings.Contains(path, ".ttf") ||
-		   strings.Contains(path, ".otf") || strings.Contains(path, ".eot") {
+			strings.Contains(path, ".woff") || strings.Contains(path, ".ttf") ||
+			strings.Contains(path, ".otf") || strings.Contains(path, ".eot") {
 			return match
 		}
 		return `href="` + proxyPrefix + path + `"`
@@ -457,8 +448,8 @@ func rewriteHTMLFallback(body, originalHost string) string {
 		path = strings.TrimSuffix(path, `"`)
 		// Skip if it's a resource file (keep absolute)
 		if strings.Contains(path, ".css") || strings.Contains(path, ".js") ||
-		   strings.Contains(path, ".woff") || strings.Contains(path, ".ttf") ||
-		   strings.Contains(path, ".otf") || strings.Contains(path, ".eot") {
+			strings.Contains(path, ".woff") || strings.Contains(path, ".ttf") ||
+			strings.Contains(path, ".otf") || strings.Contains(path, ".eot") {
 			return match
 		}
 		return `href="/https://` + originalHost + path + `"`
@@ -514,7 +505,11 @@ func createRedirectResponse(location string) js.Value {
 func createRulesetResponse() js.Value {
 	result := js.Global().Get("Object").New()
 	result.Set("status", 200)
-	result.Set("body", embeddedRuleset)
+	body := embeddedRuleset
+	if rulesetRawText != "" {
+		body = rulesetRawText
+	}
+	result.Set("body", body)
 
 	headers := js.Global().Get("Object").New()
 	headers.Set("Content-Type", "application/x-yaml")
@@ -548,6 +543,9 @@ func convertResponseToJS(response map[string]interface{}) js.Value {
 
 // getRuleset returns the embedded ruleset
 func getRuleset(this js.Value, args []js.Value) interface{} {
+	if rulesetRawText != "" {
+		return rulesetRawText
+	}
 	return embeddedRuleset
 }
 
@@ -761,6 +759,7 @@ func parseEmbeddedRuleset() {
 		fmt.Printf("Error parsing embedded YAML ruleset: %v\n", err)
 		return
 	}
+	rulesetRawText = embeddedRuleset
 	fmt.Printf("Successfully parsed %d rules from embedded YAML\n", len(parsedRules))
 }
 
@@ -805,19 +804,18 @@ func fetchRemoteRuleset(manifestURL string) bool {
 				return nil
 			}
 
-			// Try to fetch YAML ruleset first (preferred for Go WASM)
-			if manifest.SitesAggregatedYAML != nil && manifest.SitesAggregatedYAML.URL != "" {
-				fmt.Printf("Fetching YAML ruleset from: %s\n", manifest.SitesAggregatedYAML.URL)
-				if fetchAndParseYAMLRuleset(manifest.SitesAggregatedYAML.URL) {
+			// Prefer JSON ruleset for worker efficiency, fallback to YAML if needed
+			if manifest.SitesAggregatedJSON != nil && manifest.SitesAggregatedJSON.URL != "" {
+				fmt.Printf("Fetching JSON ruleset from: %s\n", manifest.SitesAggregatedJSON.URL)
+				if fetchAndParseJSONRuleset(manifest.SitesAggregatedJSON.URL) {
 					done <- true
 					return nil
 				}
 			}
 
-			// Fallback to JSON ruleset if YAML fails
-			if manifest.SitesAggregatedJSON != nil && manifest.SitesAggregatedJSON.URL != "" {
-				fmt.Printf("Fetching JSON ruleset from: %s\n", manifest.SitesAggregatedJSON.URL)
-				if fetchAndParseJSONRuleset(manifest.SitesAggregatedJSON.URL) {
+			if manifest.SitesAggregatedYAML != nil && manifest.SitesAggregatedYAML.URL != "" {
+				fmt.Printf("Fetching YAML ruleset from: %s\n", manifest.SitesAggregatedYAML.URL)
+				if fetchAndParseYAMLRuleset(manifest.SitesAggregatedYAML.URL) {
 					done <- true
 					return nil
 				}
@@ -878,6 +876,7 @@ func fetchAndParseYAMLRuleset(yamlURL string) bool {
 				return nil
 			}
 
+			rulesetRawText = yamlText
 			fmt.Printf("Successfully parsed %d rules from remote YAML\n", len(parsedRules))
 			done <- true
 			return nil
@@ -948,6 +947,11 @@ func fetchAndParseJSONRuleset(jsonURL string) bool {
 				return nil
 			}
 
+			if marshaled, err := yaml.Marshal(parsedRules); err == nil {
+				rulesetRawText = string(marshaled)
+			} else {
+				rulesetRawText = jsonText
+			}
 			fmt.Printf("Successfully parsed %d rules from remote JSON\n", len(parsedRules))
 			done <- true
 			return nil
@@ -968,7 +972,6 @@ func fetchAndParseJSONRuleset(jsonURL string) bool {
 		return false
 	}
 }
-
 
 // findRuleForDomain finds the matching rule for a given domain and path
 func findRuleForDomain(domain string) Rule {
@@ -1167,7 +1170,7 @@ func applyContentScripts(content string, contentScripts []ContentScript) string 
 		case "hide_elem":
 			if script.Selector != "" {
 				doc.Find(script.Selector).Each(func(i int, s *goquery.Selection) {
-					s.SetAttr("style", s.AttrOr("style", "") + "; display: none !important;")
+					s.SetAttr("style", s.AttrOr("style", "")+"; display: none !important;")
 				})
 			}
 		case "rm_class":
@@ -1231,7 +1234,6 @@ func applyContentScriptsStringFallback(content string, contentScripts []ContentS
 	}
 	return content
 }
-
 
 // getCachedRegex returns a cached compiled regex or compiles and caches a new one
 func getCachedRegex(pattern string) (*regexp.Regexp, error) {

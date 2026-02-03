@@ -1,0 +1,102 @@
+name: Update ruleset and redeploy
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch: {}
+  repository_dispatch:
+    types: [ruleset-updated]
+
+concurrency:
+  group: ruleset-redeploy
+  cancel-in-progress: false
+
+jobs:
+  update-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RULESET_URL: "https://bypass.andrewe.dev/manifest.json"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Update ruleset from manifest
+        run: npm run update-rules
+
+      - name: Detect ruleset changes
+        id: diff
+        run: |
+          if git diff --quiet -- sites_aggregated.yaml; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build WASM
+        if: steps.diff.outputs.changed == 'true'
+        run: npm run build
+
+      - name: Prepare Wrangler config
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+          ruleset_url = os.environ.get("RULESET_URL", "").strip()
+
+          if not account_id:
+            raise SystemExit("Missing CLOUDFLARE_ACCOUNT_ID secret.")
+          if not ruleset_url:
+            raise SystemExit("Missing RULESET_URL env var.")
+
+          src = Path("wrangler.toml").read_text()
+          src = re.sub(r'account_id\\s*=\\s*\".*?\"', f'account_id = \"{account_id}\"', src)
+
+          if "RULESET_URL" in src:
+            src = re.sub(r'RULESET_URL\\s*=\\s*\".*?\"', f'RULESET_URL = \"{ruleset_url}\"', src)
+          else:
+            src = src.rstrip() + f'\\n\\n[vars]\\nRULESET_URL = \"{ruleset_url}\"\\n'
+
+          Path("wrangler.ci.toml").write_text(src)
+          PY
+
+      - name: Deploy
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx wrangler deploy --config wrangler.ci.toml --keep-vars
+
+      - name: Commit updated ruleset
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add sites_aggregated.yaml public/main.wasm public/wasm_exec.js
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "Update ruleset snapshot"
+          git push

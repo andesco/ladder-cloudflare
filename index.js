@@ -15,7 +15,27 @@ import './public/wasm_exec.js';
 // Global rule cache
 let aggregatedRules = null;
 let rulesLastUpdated = null;
+let rulesetVersion = null;
+let rulesetMetaLastChecked = 0;
+let globalBlockRegexRules = null;
+let globalBlockRegexVersion = null;
 const RULES_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+const RULESET_META_CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes
+
+const USER_AGENT_DESKTOP_G = 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
+const USER_AGENT_MOBILE_G = 'Chrome/137.0.7151.119 Mobile Safari/537.36 (compatible ; Googlebot/2.1 ; +http://www.google.com/bot.html)';
+const USER_AGENT_DESKTOP_B = 'Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)';
+const USER_AGENT_MOBILE_B = 'Chrome/137.0.7151.119 Mobile Safari/537.36 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)';
+const USER_AGENT_DESKTOP_F = 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)';
+const GOOGLEBOT_XFF = '66.249.66.1';
+
+const REFERER_PRESETS = {
+  google: 'https://www.google.com/',
+  facebook: 'https://www.facebook.com/',
+  twitter: 'https://t.co/'
+};
+
+const ARCHIVE_DOMAINS = ['archive.is', 'archive.today', 'archive.ph', 'archive.li'];
 
 /**
  * Expand domain groups into individual rules (Phase 2)
@@ -56,6 +76,1212 @@ function isDeletionRule(rule) {
          (rule.domain && rule.domain.startsWith("###_") && !rule.group); // Group deletion
 }
 
+function getRulesetCacheKeys(rulesetUrl) {
+  const safeKey = rulesetUrl.replace(/[^a-zA-Z0-9]/g, '_');
+  return {
+    dataKey: `ruleset_url_${safeKey}`,
+    metaKey: `ruleset_meta_${safeKey}`
+  };
+}
+
+function pickRulesetSourceFromManifest(manifest) {
+  if (manifest?.sites_aggregated_json?.url) {
+    return {
+      url: manifest.sites_aggregated_json.url,
+      version: manifest.sites_aggregated_json.version || null,
+      format: 'json'
+    };
+  }
+
+  if (manifest?.sites_aggregated_yaml?.url) {
+    return {
+      url: manifest.sites_aggregated_yaml.url,
+      version: manifest.sites_aggregated_yaml.version || null,
+      format: 'yaml'
+    };
+  }
+
+  return null;
+}
+
+async function fetchRulesetSource(source) {
+  const response = await fetch(source.url, {
+    cf: { cacheTtl: 0 }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch ruleset from ${source.url}: ${response.status}`);
+  }
+
+  if (source.format === 'yaml') {
+    const yamlText = await response.text();
+    return parseYamlRules(yamlText);
+  }
+
+  const jsonRules = await response.json();
+  return convertJsonToRuleFormat(jsonRules);
+}
+
+async function refreshRulesetCache(env, options = {}) {
+  const { reason = 'manual', force = false } = options;
+
+  if (!env.RULESET_URL) {
+    console.warn(`Ruleset refresh skipped (${reason}): RULESET_URL not set`);
+    return { updated: false, reason: 'missing_ruleset_url' };
+  }
+
+  const rulesetUrl = env.RULESET_URL;
+  const keys = getRulesetCacheKeys(rulesetUrl);
+
+  if (!env.CONFIG_KV) {
+    console.warn(`Ruleset refresh (${reason}): CONFIG_KV not configured, fetching without cache`);
+  }
+
+  const existingMeta = env.CONFIG_KV
+    ? await env.CONFIG_KV.get(keys.metaKey, { type: 'json' })
+    : null;
+
+  const manifestResponse = await fetch(rulesetUrl, {
+    cf: { cacheTtl: 0 }
+  });
+
+  if (!manifestResponse.ok) {
+    throw new Error(`Failed to fetch RULESET_URL ${rulesetUrl}: ${manifestResponse.status}`);
+  }
+
+  const contentType = manifestResponse.headers.get('content-type') || '';
+  let rulesData = null;
+  let meta = {
+    manifest_url: null,
+    manifest_version: null,
+    ruleset_url: rulesetUrl,
+    ruleset_version: null,
+    ruleset_format: null,
+    updated_at: Date.now(),
+    last_checked: Date.now()
+  };
+
+  if (contentType.includes('application/json') || rulesetUrl.endsWith('.json')) {
+    const jsonPayload = await manifestResponse.json();
+
+    if (jsonPayload.sites_aggregated_json || jsonPayload.sites_aggregated_yaml) {
+      meta.manifest_url = rulesetUrl;
+      const rulesetSource = pickRulesetSourceFromManifest(jsonPayload);
+
+      if (!rulesetSource) {
+        throw new Error('Manifest does not include sites_aggregated_json or sites_aggregated_yaml');
+      }
+
+      meta.ruleset_url = rulesetSource.url;
+      meta.ruleset_version = rulesetSource.version || null;
+      meta.ruleset_format = rulesetSource.format;
+      meta.manifest_version = rulesetSource.version || null;
+
+      const versionUnchanged =
+        !force &&
+        meta.ruleset_version &&
+        existingMeta?.ruleset_version === meta.ruleset_version &&
+        existingMeta?.ruleset_url === meta.ruleset_url;
+
+      if (versionUnchanged) {
+        if (env.CONFIG_KV) {
+          await env.CONFIG_KV.put(keys.metaKey, JSON.stringify({
+            ...existingMeta,
+            last_checked: Date.now()
+          }), { expirationTtl: RULES_CACHE_TTL });
+        }
+        return { updated: false, reason: 'version_unchanged', meta };
+      }
+
+      rulesData = await fetchRulesetSource(rulesetSource);
+    } else if (jsonPayload.sites_js_url || jsonPayload.sites_json_url || jsonPayload.sites_updated_url) {
+      // Legacy manifest support
+      rulesData = await loadRulesFromManifest(jsonPayload, env);
+      meta.ruleset_format = 'json';
+    } else {
+      rulesData = Array.isArray(jsonPayload) ? convertJsonToRuleFormat(jsonPayload) : jsonPayload;
+      meta.ruleset_format = 'json';
+    }
+  } else if (
+    contentType.includes('text/yaml') ||
+    contentType.includes('application/yaml') ||
+    rulesetUrl.endsWith('.yaml') ||
+    rulesetUrl.endsWith('.yml')
+  ) {
+    const yamlText = await manifestResponse.text();
+    rulesData = parseYamlRules(yamlText);
+    meta.ruleset_format = 'yaml';
+  } else {
+    console.warn('Unknown RULESET_URL format, treating as JSON');
+    const jsonPayload = await manifestResponse.json();
+    rulesData = Array.isArray(jsonPayload) ? convertJsonToRuleFormat(jsonPayload) : jsonPayload;
+    meta.ruleset_format = 'json';
+  }
+
+  if (!rulesData) {
+    throw new Error('Failed to load ruleset data');
+  }
+
+  meta.rules_count = Object.keys(rulesData).length;
+
+  if (env.CONFIG_KV) {
+    await env.CONFIG_KV.put(keys.dataKey, JSON.stringify({
+      data: rulesData,
+      timestamp: Date.now()
+    }), { expirationTtl: RULES_CACHE_TTL });
+
+    await env.CONFIG_KV.put(keys.metaKey, JSON.stringify(meta), {
+      expirationTtl: RULES_CACHE_TTL
+    });
+  }
+
+  rulesetVersion = meta.ruleset_version || rulesetVersion;
+  aggregatedRules = null;
+  rulesLastUpdated = 0;
+  globalBlockRegexRules = null;
+  globalBlockRegexVersion = null;
+
+  return { updated: true, rulesData, meta };
+}
+
+async function maybeRefreshInMemoryRules(env) {
+  if (!env.CONFIG_KV || !env.RULESET_URL) return;
+
+  const now = Date.now();
+  if ((now - rulesetMetaLastChecked) < RULESET_META_CHECK_INTERVAL) {
+    return;
+  }
+
+  rulesetMetaLastChecked = now;
+  const keys = getRulesetCacheKeys(env.RULESET_URL);
+  const meta = await env.CONFIG_KV.get(keys.metaKey, { type: 'json' });
+
+  if (!meta) return;
+
+  if (!rulesetVersion && meta.ruleset_version) {
+    rulesetVersion = meta.ruleset_version;
+  }
+
+  if (meta.ruleset_version && rulesetVersion && meta.ruleset_version !== rulesetVersion) {
+    aggregatedRules = null;
+    rulesLastUpdated = 0;
+    globalBlockRegexRules = null;
+    globalBlockRegexVersion = null;
+    rulesetVersion = meta.ruleset_version;
+    return;
+  }
+
+  if (meta.updated_at && rulesLastUpdated && meta.updated_at > rulesLastUpdated) {
+    aggregatedRules = null;
+    rulesLastUpdated = 0;
+    globalBlockRegexRules = null;
+    globalBlockRegexVersion = null;
+  }
+}
+
+function parseJsonSafe(value, fallback = null) {
+  if (value == null) return fallback;
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    console.warn('Failed to parse JSON value:', error);
+    return fallback;
+  }
+}
+
+function toBooleanFlag(value) {
+  return value === 1 || value === true || value === '1' || value === 'true';
+}
+
+function normalizeArray(value) {
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function normalizeRule(rule) {
+  if (!rule) return null;
+  const normalized = { ...rule };
+
+  normalized.allow_cookies = toBooleanFlag(rule.allow_cookies);
+  normalized.remove_cookies = toBooleanFlag(rule.remove_cookies);
+  normalized.cs_dompurify = toBooleanFlag(rule.cs_dompurify);
+  normalized.cs_clear_lclstrg = toBooleanFlag(rule.cs_clear_lclstrg);
+  normalized.cs_all_frames = toBooleanFlag(rule.cs_all_frames);
+  normalized.block_host_perm_add = toBooleanFlag(rule.block_host_perm_add);
+  normalized.exception = toBooleanFlag(rule.exception);
+  normalized.amp_unhide = toBooleanFlag(rule.amp_unhide);
+
+  normalized.remove_cookies_select_drop = normalizeArray(rule.remove_cookies_select_drop);
+  normalized.remove_cookies_select_hold = normalizeArray(rule.remove_cookies_select_hold);
+  normalized.excluded_domains = normalizeArray(rule.excluded_domains);
+
+  if (normalized.remove_cookies_select_drop.length || normalized.remove_cookies_select_hold.length) {
+    normalized.allow_cookies = true;
+    normalized.remove_cookies = true;
+  }
+
+  if (rule.cs_code) {
+    const parsed = parseJsonSafe(rule.cs_code, []);
+    normalized.cs_code = Array.isArray(parsed) ? parsed : [];
+  } else {
+    normalized.cs_code = [];
+  }
+
+  if (rule.headers_custom && typeof rule.headers_custom === 'object') {
+    normalized.headers_custom = { ...rule.headers_custom };
+  }
+
+  if (rule.cs_param && typeof rule.cs_param === 'object') {
+    normalized.cs_param = { ...rule.cs_param };
+  }
+
+  return normalized;
+}
+
+function isValidRuleDomain(ruleDomain) {
+  return typeof ruleDomain === 'string' && ruleDomain.length > 0 && !ruleDomain.startsWith('#');
+}
+
+function normalizeHostname(hostname) {
+  return hostname.replace(/^www\./i, '');
+}
+
+function extractHeaderParams(value) {
+  if (!value || typeof value !== 'object') return {};
+  const headers = {};
+  for (const [rawKey, rawValue] of Object.entries(value)) {
+    if (rawValue == null) continue;
+    const key = String(rawKey).trim();
+    if (!key) continue;
+    const lower = key.toLowerCase();
+    const isHeader = lower.startsWith('x-') || [
+      'authorization',
+      'cookie',
+      'referer',
+      'user-agent',
+      'accept',
+      'accept-language',
+      'accept-encoding',
+      'x-real-ip',
+      'x-requested-with'
+    ].includes(lower);
+    if (isHeader) {
+      headers[key] = String(rawValue);
+    }
+  }
+  return headers;
+}
+
+function getRuleHeaderOverrides(rule) {
+  const headers = {};
+  if (!rule) return headers;
+  if (rule.headers_custom && typeof rule.headers_custom === 'object') {
+    for (const [key, value] of Object.entries(rule.headers_custom)) {
+      headers[key] = value;
+    }
+  }
+  const csParamHeaders = extractHeaderParams(rule.cs_param);
+  for (const [key, value] of Object.entries(csParamHeaders)) {
+    if (!Object.prototype.hasOwnProperty.call(headers, key)) {
+      headers[key] = value;
+    }
+  }
+  return headers;
+}
+
+function prepRegexString(pattern, domain = '') {
+  if (!pattern) return '';
+  let result = pattern;
+  if (domain) {
+    const safeDomain = domain.replace(/\./g, '\\.');
+    result = result.replace(/{domain}/g, safeDomain);
+  }
+  return result.replace(/^\//, '').replace(/\/\//g, '/').replace(/([^\\])\/$/, '$1');
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildRegex(pattern, domain) {
+  if (!pattern) return null;
+  try {
+    const source = pattern instanceof RegExp ? pattern.source : prepRegexString(String(pattern), domain);
+    return new RegExp(source);
+  } catch (error) {
+    console.warn('Invalid regex pattern:', pattern, error);
+    return null;
+  }
+}
+
+function shouldExcludeDomain(rule, hostname) {
+  if (!rule || !rule.excluded_domains || rule.excluded_domains.length === 0) {
+    return false;
+  }
+  const base = normalizeHostname(hostname);
+  return rule.excluded_domains.some((excluded) => {
+    const excludedBase = normalizeHostname(excluded);
+    return base === excludedBase || base.endsWith(`.${excludedBase}`);
+  });
+}
+
+function findRuleForDomain(domain, rules) {
+  const baseDomain = normalizeHostname(domain);
+
+  for (const [, rawRule] of Object.entries(rules)) {
+    if (!rawRule || !isValidRuleDomain(rawRule.domain)) {
+      continue;
+    }
+
+    const normalized = normalizeRule(rawRule);
+    if (normalized.exception) {
+      continue;
+    }
+
+    const ruleDomain = normalizeHostname(normalized.domain);
+    if (ruleDomain === baseDomain || baseDomain.endsWith(`.${ruleDomain}`)) {
+      if (shouldExcludeDomain(normalized, baseDomain)) {
+        continue;
+      }
+      return normalized;
+    }
+
+    if (Array.isArray(normalized.group)) {
+      for (const grouped of normalized.group) {
+        const groupedBase = normalizeHostname(grouped);
+        if (groupedBase === baseDomain || baseDomain.endsWith(`.${groupedBase}`)) {
+          if (shouldExcludeDomain(normalized, baseDomain)) {
+            continue;
+          }
+          return normalized;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function getGlobalBlockRegexRules(rules) {
+  if (globalBlockRegexRules && globalBlockRegexVersion === rulesLastUpdated) {
+    return globalBlockRegexRules;
+  }
+
+  const globalRules = [];
+  for (const rawRule of Object.values(rules || {})) {
+    if (!rawRule || !rawRule.block_regex_general || !isValidRuleDomain(rawRule.domain)) {
+      continue;
+    }
+    const normalized = normalizeRule(rawRule);
+    if (!normalized || normalized.exception) {
+      continue;
+    }
+    globalRules.push(normalized);
+  }
+
+  globalBlockRegexRules = globalRules;
+  globalBlockRegexVersion = rulesLastUpdated;
+  return globalRules;
+}
+
+function getGlobalBlockRegexesForDomain(rules, hostname) {
+  const globalRules = getGlobalBlockRegexRules(rules);
+  if (!globalRules.length) return [];
+
+  const baseDomain = normalizeHostname(hostname);
+  const regexes = [];
+  for (const rule of globalRules) {
+    if (shouldExcludeDomain(rule, baseDomain)) {
+      continue;
+    }
+    const regex = buildRegex(rule.block_regex_general, rule.domain);
+    if (regex) {
+      regexes.push(regex);
+    }
+  }
+  return regexes;
+}
+
+function isMobileUserAgent(ua) {
+  return typeof ua === 'string' && ua.toLowerCase().includes('mobile');
+}
+
+function resolveUserAgent(rule, env, clientUserAgent) {
+  if (!rule) {
+    return env.USER_AGENT || USER_AGENT_DESKTOP_G;
+  }
+
+  if (rule.useragent_custom) {
+    return rule.useragent_custom;
+  }
+
+  if (rule.useragent) {
+    const mobile = isMobileUserAgent(clientUserAgent);
+    switch (rule.useragent) {
+      case 'googlebot':
+        return mobile ? USER_AGENT_MOBILE_G : USER_AGENT_DESKTOP_G;
+      case 'bingbot':
+        return mobile ? USER_AGENT_MOBILE_B : USER_AGENT_DESKTOP_B;
+      case 'facebookbot':
+        return USER_AGENT_DESKTOP_F;
+      default:
+        break;
+    }
+  }
+
+  return env.USER_AGENT || USER_AGENT_DESKTOP_G;
+}
+
+function resolveReferer(rule, targetUrl) {
+  if (!rule) return null;
+  if (rule.referer_custom) return rule.referer_custom;
+  if (rule.referer && REFERER_PRESETS[rule.referer]) {
+    return REFERER_PRESETS[rule.referer];
+  }
+  return `${targetUrl.protocol}//${targetUrl.host}`;
+}
+
+function randomIpForRule(rule) {
+  if (!rule || !rule.random_ip) return null;
+  const randomByte = () => Math.floor(Math.random() * 254) + 1;
+  if (rule.random_ip === 'eu') {
+    return `185.${randomByte()}.${randomByte()}.${randomByte()}`;
+  }
+  return `${randomByte()}.${randomByte()}.${randomByte()}.${randomByte()}`;
+}
+
+function resolveRequestHeaders(rule, env, targetUrl, clientUserAgent, fetchInstructions) {
+  const headers = {
+    'User-Agent': resolveUserAgent(rule, env, clientUserAgent),
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+    'Accept-Encoding': 'gzip, deflate',
+    'DNT': '1',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1'
+  };
+
+  let userAgentSetByRule = false;
+  if (rule?.useragent_custom) {
+    headers['User-Agent'] = rule.useragent_custom;
+    userAgentSetByRule = true;
+  } else if (rule?.useragent) {
+    userAgentSetByRule = true;
+    switch (rule.useragent) {
+      case 'googlebot':
+        headers['User-Agent'] = isMobileUserAgent(clientUserAgent) ? USER_AGENT_MOBILE_G : USER_AGENT_DESKTOP_G;
+        break;
+      case 'bingbot':
+        headers['User-Agent'] = isMobileUserAgent(clientUserAgent) ? USER_AGENT_MOBILE_B : USER_AGENT_DESKTOP_B;
+        break;
+      case 'facebookbot':
+        headers['User-Agent'] = USER_AGENT_DESKTOP_F;
+        break;
+      default:
+        break;
+    }
+  }
+
+  if (!userAgentSetByRule) {
+    if (env.USER_AGENT) {
+      headers['User-Agent'] = env.USER_AGENT;
+    } else if (fetchInstructions?.userAgent) {
+      headers['User-Agent'] = fetchInstructions.userAgent;
+    }
+  }
+
+  let referer = null;
+  let skipReferer = false;
+  if (rule?.useragent === 'googlebot') {
+    referer = REFERER_PRESETS.google;
+  } else if (!rule?.useragent && !rule?.useragent_custom && !rule?.headers_custom) {
+    if (rule?.referer_custom) {
+      referer = rule.referer_custom;
+    } else if (rule?.referer) {
+      if (rule.referer === 'none') {
+        skipReferer = true;
+      } else if (REFERER_PRESETS[rule.referer]) {
+        referer = REFERER_PRESETS[rule.referer];
+      } else {
+        referer = rule.referer;
+      }
+    }
+  }
+
+  if (!referer && !skipReferer) {
+    referer = fetchInstructions?.referer || `${targetUrl.protocol}//${targetUrl.host}`;
+  }
+
+  if (referer) {
+    headers['Referer'] = referer;
+  }
+
+  let xForwardedFor = null;
+  if (rule?.random_ip) {
+    xForwardedFor = randomIpForRule(rule);
+  } else if (rule?.useragent === 'googlebot') {
+    xForwardedFor = GOOGLEBOT_XFF;
+  } else if (env.X_FORWARDED_FOR) {
+    xForwardedFor = env.X_FORWARDED_FOR;
+  } else if (fetchInstructions?.xForwardedFor) {
+    xForwardedFor = fetchInstructions.xForwardedFor;
+  }
+
+  if (xForwardedFor) {
+    headers['X-Forwarded-For'] = xForwardedFor;
+  }
+
+  if (fetchInstructions?.accept) headers['Accept'] = fetchInstructions.accept;
+  if (fetchInstructions?.acceptLanguage) headers['Accept-Language'] = fetchInstructions.acceptLanguage;
+  if (fetchInstructions?.acceptEncoding) headers['Accept-Encoding'] = fetchInstructions.acceptEncoding;
+  if (fetchInstructions?.authorization) headers['Authorization'] = fetchInstructions.authorization;
+  if (fetchInstructions?.xRealIP) headers['X-Real-IP'] = fetchInstructions.xRealIP;
+  if (fetchInstructions?.xRequestedWith) headers['X-Requested-With'] = fetchInstructions.xRequestedWith;
+
+  const headerOverrides = getRuleHeaderOverrides(rule);
+  for (const [key, value] of Object.entries(headerOverrides)) {
+    headers[key] = value;
+  }
+
+  if (rule?.allow_cookies && fetchInstructions?.cookie && !headers['Cookie']) {
+    headers['Cookie'] = fetchInstructions.cookie;
+  }
+
+  return headers;
+}
+
+function shouldBlockUrl(targetUrl, rule, globalRegexes = []) {
+  const regexes = Array.isArray(globalRegexes) ? [...globalRegexes] : [];
+
+  if (rule?.block_regex) {
+    const regex = buildRegex(rule.block_regex, rule.domain);
+    if (regex) regexes.push(regex);
+  }
+
+  if (rule?.block_regex_general) {
+    const regex = buildRegex(rule.block_regex_general, rule.domain);
+    if (regex) regexes.push(regex);
+  }
+
+  if (!regexes.length) return false;
+
+  for (const regex of regexes) {
+    if (regex && regex.test(targetUrl)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function splitSetCookieHeader(headerValue) {
+  if (!headerValue) return [];
+
+  const parts = [];
+  let current = '';
+  let inExpires = false;
+
+  for (let i = 0; i < headerValue.length; i++) {
+    const char = headerValue[i];
+    current += char;
+
+    if (char === ',' && !inExpires) {
+      const next = headerValue.slice(i + 1);
+      if (/^\s*[^=]+?=/.test(next)) {
+        parts.push(current.slice(0, -1).trim());
+        current = '';
+      }
+    }
+
+    if (headerValue.slice(i - 7, i + 1).toLowerCase() === 'expires=') {
+      inExpires = true;
+    }
+    if (inExpires && char === ';') {
+      inExpires = false;
+    }
+  }
+
+  if (current.trim()) {
+    parts.push(current.trim());
+  }
+
+  return parts;
+}
+
+function filterSetCookieHeaders(headerValue, rule) {
+  if (!headerValue) return null;
+  if (!rule) {
+    return null;
+  }
+
+  const cookies = splitSetCookieHeader(headerValue);
+  if (!cookies.length) return null;
+
+  const dropList = new Set(rule.remove_cookies_select_drop || []);
+  const holdList = new Set(rule.remove_cookies_select_hold || []);
+  const hasSelectLists = dropList.size > 0 || holdList.size > 0;
+  const consentRegex = /(consent|^optanon)/i;
+
+  const filtered = cookies.filter((cookie) => {
+    const name = cookie.split('=')[0].trim();
+    if (consentRegex.test(name)) {
+      return true;
+    }
+    if (dropList.size > 0) {
+      return !dropList.has(name);
+    }
+    if (holdList.size > 0) {
+      return holdList.has(name);
+    }
+    if (rule.remove_cookies) {
+      return false;
+    }
+    if (!rule.allow_cookies) {
+      return false;
+    }
+    return true;
+  });
+
+  if (!rule.allow_cookies && !rule.remove_cookies && !hasSelectLists) {
+    return null;
+  }
+
+  return filtered.length ? filtered.join(', ') : null;
+}
+
+function sanitizeHtmlSnippet(html) {
+  if (!html) return '';
+  return html
+    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, '')
+    .replace(/\son\w+="[^"]*"/gi, '')
+    .replace(/\son\w+='[^']*'/gi, '')
+    .replace(/javascript:/gi, '');
+}
+
+function decodeHtmlEntities(text) {
+  if (!text || typeof text !== 'string') return '';
+  return text
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/&#([0-9]+);/g, (_, num) => String.fromCharCode(parseInt(num, 10)));
+}
+
+function buildExternalLinkHtml(targetUrl, type) {
+  const cleanUrl = targetUrl.split('#')[0];
+  const encodedUrl = encodeURIComponent(cleanUrl);
+  let linkLabel = 'External link';
+  let linkHref = cleanUrl;
+
+  if (type === 'archive.is' || type === 'archive.today') {
+    linkLabel = 'archive.is';
+    linkHref = `https://archive.is/?run=1&url=${encodedUrl}`;
+  } else if (type === 'google_search_tool') {
+    linkLabel = 'Google Rich Results';
+    linkHref = `https://search.google.com/test/rich-results?url=${encodedUrl}`;
+  }
+
+  return `
+    <div id="bpc_ext_link" style="margin:20px 0;font-size:16px;font-weight:bold;color:#c00;">
+      <span>Bypass helper:</span>
+      <a href="${linkHref}" target="_blank" rel="noopener noreferrer" style="color:#c00;margin-left:8px;">${linkLabel}</a>
+    </div>
+  `;
+}
+
+function buildArchiveUrl(targetUrl) {
+  const cleanUrl = targetUrl.split(/[#?]/)[0];
+  const domain = ARCHIVE_DOMAINS[Math.floor(Math.random() * ARCHIVE_DOMAINS.length)];
+  return `https://${domain}/${cleanUrl}`;
+}
+
+async function fetchArchiveSnapshot(targetUrl) {
+  try {
+    const archiveUrl = buildArchiveUrl(targetUrl);
+    const response = await fetch(archiveUrl);
+    if (!response.ok) return null;
+    const content = await response.text();
+    return {
+      url: archiveUrl,
+      host: new URL(archiveUrl).host,
+      contentType: response.headers.get('Content-Type') || 'text/html',
+      content
+    };
+  } catch (error) {
+    console.warn('Archive fetch failed:', error);
+    return null;
+  }
+}
+
+function splitRuleSelectors(value) {
+  if (!value || typeof value !== 'string') return [];
+  return value.split('|').map((item) => item.trim());
+}
+
+function expandCsCodeActions(actions, parentSelector = '') {
+  const expanded = [];
+  for (const action of actions || []) {
+    if (!action || typeof action !== 'object') continue;
+
+    if (action.add_style) {
+      expanded.push({ type: 'add_style', value: action.add_style });
+    }
+
+    if (action.hide_elem) {
+      const selector = parentSelector ? `${parentSelector} ${action.hide_elem}` : action.hide_elem;
+      expanded.push({ type: 'hide_elem', selector });
+    }
+
+    if (action.rm_elem_wait) {
+      const selector = parentSelector ? `${parentSelector} ${action.rm_elem_wait}` : action.rm_elem_wait;
+      expanded.push({ type: 'rm_elem', selector });
+    }
+
+    if (action.cond) {
+      const selector = parentSelector ? `${parentSelector} ${action.cond}` : action.cond;
+      if (action.rm_elem) {
+        expanded.push({ type: 'rm_elem', selector });
+      }
+      if (action.rm_class) {
+        expanded.push({ type: 'rm_class', selector, value: action.rm_class });
+      }
+      if (action.rm_attrib) {
+        expanded.push({ type: 'rm_attrib', selector, value: action.rm_attrib });
+      }
+      if (action.set_attrib) {
+        expanded.push({ type: 'set_attrib', selector, value: action.set_attrib });
+      }
+      if (action.elems) {
+        expanded.push(...expandCsCodeActions(action.elems, selector));
+      }
+    }
+  }
+  return expanded;
+}
+
+function registerCsCodeHandlers(rewriter, actions, headSnippets) {
+  for (const action of actions) {
+    if (action.type === 'add_style') {
+      headSnippets.push(`<style>${action.value}</style>`);
+      continue;
+    }
+
+    if (!action.selector) continue;
+
+    if (action.type === 'hide_elem') {
+      rewriter.on(action.selector, {
+        element(element) {
+          const existing = element.getAttribute('style') || '';
+          element.setAttribute('style', `${existing} display:none !important;`);
+        }
+      });
+      continue;
+    }
+
+    if (action.type === 'rm_elem') {
+      rewriter.on(action.selector, {
+        element(element) {
+          element.remove();
+        }
+      });
+      continue;
+    }
+
+    if (action.type === 'rm_class') {
+      const classes = String(action.value || '').split(/[,|]/).map((item) => item.trim()).filter(Boolean);
+      if (!classes.length) continue;
+      rewriter.on(action.selector, {
+        element(element) {
+          const current = element.getAttribute('class') || '';
+          if (!current) return;
+          const remaining = current
+            .split(/\s+/)
+            .filter((cls) => cls && !classes.includes(cls));
+          if (remaining.length) {
+            element.setAttribute('class', remaining.join(' '));
+          } else {
+            element.removeAttribute('class');
+          }
+        }
+      });
+      continue;
+    }
+
+    if (action.type === 'rm_attrib') {
+      const attribs = String(action.value || '').split('|').map((item) => item.trim()).filter(Boolean);
+      if (!attribs.length) continue;
+      rewriter.on(action.selector, {
+        element(element) {
+          for (const attrib of attribs) {
+            element.removeAttribute(attrib);
+          }
+        }
+      });
+      continue;
+    }
+
+    if (action.type === 'set_attrib') {
+      const [attrib, value] = String(action.value || '').split('|');
+      if (!attrib) continue;
+      rewriter.on(action.selector, {
+        element(element) {
+          element.setAttribute(attrib.trim(), (value || '').trim());
+        }
+      });
+      continue;
+    }
+  }
+}
+
+function buildBlockRegexList(rule, globalRegexes = []) {
+  const regexes = Array.isArray(globalRegexes) ? [...globalRegexes] : [];
+  if (!rule) return regexes;
+  const patterns = [rule.block_regex, rule.block_regex_general].filter(Boolean);
+  for (const pattern of patterns) {
+    const regex = buildRegex(pattern, rule.domain);
+    if (regex) regexes.push(regex);
+  }
+  return regexes;
+}
+
+function registerBlockedResourceHandlers(rewriter, rule, baseUrl, globalRegexes = []) {
+  const regexes = buildBlockRegexList(rule, globalRegexes);
+  if (!regexes.length) return;
+
+  const shouldBlock = (url) => regexes.some((regex) => regex.test(url));
+
+  const handleAttr = (attrName) => ({
+    element(element) {
+      const attrValue = element.getAttribute(attrName);
+      if (!attrValue) return;
+
+      const candidates = [];
+      if (attrName === 'srcset') {
+        const parts = attrValue.split(',').map((part) => part.trim().split(/\s+/)[0]);
+        candidates.push(...parts.filter(Boolean));
+      } else {
+        candidates.push(attrValue);
+      }
+
+      for (let candidate of candidates) {
+        if (candidate.startsWith('/http')) {
+          candidate = candidate.slice(1);
+        }
+        let absoluteUrl = candidate;
+        try {
+          absoluteUrl = new URL(candidate, baseUrl).toString();
+        } catch (error) {
+          continue;
+        }
+        if (shouldBlock(absoluteUrl)) {
+          element.remove();
+          return;
+        }
+      }
+    }
+  });
+
+  rewriter.on('script[src]', handleAttr('src'));
+  rewriter.on('link[href]', handleAttr('href'));
+  rewriter.on('iframe[src]', handleAttr('src'));
+  rewriter.on('img[src]', handleAttr('src'));
+  rewriter.on('source[src]', handleAttr('src'));
+  rewriter.on('source[srcset]', handleAttr('srcset'));
+}
+
+function buildJsonLdInjection(html, rule) {
+  if (!rule) return null;
+  const payload = rule.ld_json;
+  if (!payload) return null;
+
+  const parts = splitRuleSelectors(payload);
+  if (parts.length < 2) return null;
+
+  const [paywallSelector, articleSelector, articleAppend, articleHold] = parts;
+  const scripts = parseJsonLdScripts(html);
+  let jsonText = null;
+
+  const findText = (json) => {
+    if (!json) return null;
+    return findKeyJson(json, [/^articlebody$/i, /^text$/i]);
+  };
+
+  for (const script of scripts) {
+    if (Array.isArray(script)) {
+      for (const entry of script) {
+        jsonText = findText(entry);
+        if (jsonText) break;
+      }
+    } else if (script['@graph'] && Array.isArray(script['@graph'])) {
+      for (const entry of script['@graph']) {
+        jsonText = findText(entry);
+        if (jsonText) break;
+      }
+    } else {
+      jsonText = findText(script);
+    }
+    if (jsonText) break;
+  }
+
+  if (!jsonText) return null;
+
+  let normalizedText = decodeHtmlEntities(jsonText)
+    .replace(/[\r\n]/g, '')
+    .replace(/(\\r)?\\n/g, '<br>')
+    .replace(/\[[^\[]+]/g, '');
+
+  if (!normalizedText.match(/\s(src|href)=/)) {
+    normalizedText = normalizedText.replace(/\n\n/g, '<br><br>');
+  }
+
+  const sanitized = sanitizeHtmlSnippet(normalizedText);
+
+  return {
+    paywallSelector,
+    articleSelector,
+    html: `<div style="margin: 25px 0px">${sanitized}</div>`,
+    append: toBooleanFlag(articleAppend) || toBooleanFlag(articleHold)
+  };
+}
+
+function buildNextDataInjection(html, rule) {
+  if (!rule || !rule.ld_json_next) return null;
+  const parts = splitRuleSelectors(rule.ld_json_next);
+  if (parts.length < 2) return null;
+
+  const [paywallSelector, articleSelector, articleAppend, articleHold] = parts;
+  const data = extractNextDataJson(html);
+  if (!data) return null;
+
+  const jsonText = findKeyJson(data, ['blocks', 'body', 'BodyPlainText', 'content', 'contentHtml', 'description', 'html'], 500);
+  if (!jsonText) return null;
+
+  let normalizedText = jsonText;
+  if (Array.isArray(jsonText)) {
+    normalizedText = jsonText.map((item) => {
+      if (typeof item === 'string') return item;
+      if (item && typeof item === 'object') {
+        if (item.text) return item.text;
+        if (item.children) return item.children.map((child) => child.text || '').join('');
+        if (item.innerHTML) return item.innerHTML;
+      }
+      return '';
+    }).join('<br><br>');
+  }
+
+  normalizedText = decodeHtmlEntities(String(normalizedText));
+  const sanitized = sanitizeHtmlSnippet(normalizedText);
+
+  return {
+    paywallSelector,
+    articleSelector,
+    html: `<div>${sanitized}</div>`,
+    append: toBooleanFlag(articleAppend) || toBooleanFlag(articleHold)
+  };
+}
+
+function buildSourceJsonInjection(html, rule) {
+  if (!rule || !rule.ld_json_source) return null;
+  const parts = splitRuleSelectors(rule.ld_json_source);
+  if (parts.length < 4) return null;
+
+  const [paywallSelector, articleSelector, filterText, jsonKey, articleAppend, articleHold] = parts;
+  const filterRegex = new RegExp(filterText.replace(/\./g, '\\.').replace('=', '\\s?=\\s?'));
+  const json = extractSourceJson(html, filterRegex);
+  if (!json) return null;
+
+  const jsonValue = getNestedKeys(json, jsonKey);
+  if (!jsonValue) return null;
+
+  const normalizedText = decodeHtmlEntities(String(jsonValue));
+  const sanitized = sanitizeHtmlSnippet(normalizedText);
+
+  return {
+    paywallSelector,
+    articleSelector,
+    html: `<div>${sanitized}</div>`,
+    append: toBooleanFlag(articleAppend) || toBooleanFlag(articleHold)
+  };
+}
+
+async function buildJsonUrlInjection(html, rule, targetUrl) {
+  if (!rule || !rule.ld_json_url) return null;
+  const parts = splitRuleSelectors(rule.ld_json_url);
+  if (parts.length < 2) return null;
+
+  const [paywallSelector, articleSelector, articleAppend, articleHold, articleIdSelector, key, urlRest, urlSlash] = parts;
+
+  let jsonUrl = null;
+  const linkMatch = html.match(/<link[^>]*rel=["']alternate["'][^>]*type=["']application\/json["'][^>]*href=["']([^"']+)["'][^>]*>/i);
+  if (linkMatch) {
+    jsonUrl = linkMatch[1];
+  }
+
+  if (!jsonUrl && articleIdSelector) {
+    const selectorMatch = articleIdSelector.match(new RegExp("meta\\\\[([^=]+)=['\\\"]([^'\\\"]+)['\\\"]\\\\]", 'i'));
+    if (selectorMatch) {
+      const attr = selectorMatch[1].trim();
+      const val = selectorMatch[2].trim();
+      const metaRegex = new RegExp(`<meta[^>]*${escapeRegExp(attr)}=["']${escapeRegExp(val)}["'][^>]*content=["']([^"']+)["'][^>]*>`, 'i');
+      const metaMatch = html.match(metaRegex);
+      if (metaMatch) {
+        const articleId = metaMatch[1];
+        jsonUrl = `${targetUrl.origin}/wp-json/wp/v2/posts/${articleId}`;
+      }
+    }
+  }
+
+  if (!jsonUrl) return null;
+
+  const useUrlRest = urlRest && (toBooleanFlag(urlRest) || String(urlRest).toLowerCase().includes('rest'));
+  const useUrlSlash = (urlSlash && (toBooleanFlag(urlSlash) || String(urlSlash).toLowerCase().includes('slash'))) ||
+    (urlRest && String(urlRest).toLowerCase().includes('slash'));
+
+  if (useUrlRest) {
+    jsonUrl = jsonUrl.replace('/wp-json/', '/?rest_route=/');
+  } else if (useUrlSlash) {
+    jsonUrl = jsonUrl.replace('/wp-json/', '//wp-json/');
+  }
+
+  try {
+    const jsonHeaders = getRuleHeaderOverrides(rule);
+    if (!Object.prototype.hasOwnProperty.call(jsonHeaders, 'Accept')) {
+      jsonHeaders['Accept'] = 'application/json';
+    }
+    const response = await fetch(jsonUrl, { headers: jsonHeaders });
+    if (!response.ok) return null;
+    const raw = await response.text();
+    const cleaned = raw.replace(/<script>[\s\S]*?<\/script>/gi, '');
+    const json = JSON.parse(cleaned);
+    const jsonValue = key ? getNestedKeys(json, key) : json?.content?.rendered;
+    if (!jsonValue) return null;
+    const normalizedText = decodeHtmlEntities(String(jsonValue));
+    const sanitized = sanitizeHtmlSnippet(normalizedText);
+    return {
+      paywallSelector,
+      articleSelector,
+      html: `<div style="margin: 25px 0px">${sanitized}</div>`,
+      append: toBooleanFlag(articleAppend) || toBooleanFlag(articleHold)
+    };
+  } catch (error) {
+    console.warn('Failed to fetch JSON URL:', error);
+    return null;
+  }
+}
+
+function parseJsonLdScripts(html) {
+  const results = [];
+  const regex = /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let match = null;
+  while ((match = regex.exec(html)) !== null) {
+    try {
+      const jsonText = match[1].trim();
+      if (!jsonText) continue;
+      const parsed = JSON.parse(jsonText);
+      results.push(parsed);
+    } catch (error) {
+      continue;
+    }
+  }
+  return results;
+}
+
+function findKeyJson(source, keys, minLength = 0) {
+  if (!source || typeof source !== 'object') return null;
+
+  const keyList = Array.isArray(keys) ? keys : [keys];
+  for (const [key, value] of Object.entries(source)) {
+    if (typeof value === 'string') {
+      const matched = keyList.some((k) => (k instanceof RegExp ? k.test(key) : k === key));
+      if (matched && value.length >= minLength) {
+        return value;
+      }
+    } else if (Array.isArray(value)) {
+      const matched = keyList.some((k) => (k instanceof RegExp ? k.test(key) : k === key));
+      if (matched && value.length) {
+        return value;
+      }
+    } else if (value && typeof value === 'object') {
+      const nested = findKeyJson(value, keys, minLength);
+      if (nested) return nested;
+    }
+  }
+  return null;
+}
+
+function getNestedKeys(obj, keyPath) {
+  if (!obj || !keyPath) return null;
+  if (Object.prototype.hasOwnProperty.call(obj, keyPath)) {
+    return obj[keyPath];
+  }
+  const keys = keyPath.split('.');
+  let value = obj;
+  for (const key of keys) {
+    if (value && typeof value === 'object') {
+      value = value[key];
+    } else {
+      return null;
+    }
+  }
+  return value;
+}
+
+function extractNextDataJson(html) {
+  const match = html.match(/<script[^>]*id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[1]);
+  } catch (error) {
+    return null;
+  }
+}
+
+function extractSourceJson(html, filter) {
+  const scripts = html.match(/<script[^>]*>([\s\S]*?)<\/script>/gi) || [];
+  for (const script of scripts) {
+    const contentMatch = script.match(/<script[^>]*>([\s\S]*?)<\/script>/i);
+    const content = contentMatch ? contentMatch[1] : '';
+    if (!filter.test(content)) continue;
+    const index = content.search(filter);
+    if (index === -1) continue;
+    const after = content.slice(index);
+    const firstBrace = after.indexOf('{');
+    if (firstBrace === -1) continue;
+    const jsonCandidate = extractBalancedJson(after.slice(firstBrace));
+    if (!jsonCandidate) continue;
+    try {
+      return JSON.parse(jsonCandidate);
+    } catch (error) {
+      continue;
+    }
+  }
+  return null;
+}
+
+function extractBalancedJson(text) {
+  let depth = 0;
+  let start = -1;
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (char === '{') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (char === '}') {
+      depth--;
+      if (depth === 0 && start !== -1) {
+        return text.slice(start, i + 1);
+      }
+    }
+  }
+  return null;
+}
+
 /**
  * Load rules from RULESET_URL with local/remote manifest comparison
  */
@@ -67,58 +1293,24 @@ async function loadRulesFromUrl(env) {
 
     console.log('Fetching remote ruleset from:', env.RULESET_URL);
 
-    // Try to get cached rules first
-    const cacheKey = `ruleset_url_${env.RULESET_URL.replace(/[^a-zA-Z0-9]/g, '_')}`;
     if (env.CONFIG_KV) {
-      const cached = await env.CONFIG_KV.get(cacheKey, { type: 'json' });
+      const keys = getRulesetCacheKeys(env.RULESET_URL);
+      const cached = await env.CONFIG_KV.get(keys.dataKey, { type: 'json' });
       if (cached && cached.timestamp && (Date.now() - cached.timestamp) < RULES_CACHE_TTL) {
+        const meta = await env.CONFIG_KV.get(keys.metaKey, { type: 'json' });
+        if (meta?.ruleset_version) {
+          rulesetVersion = meta.ruleset_version;
+        }
         return cached.data || {};
       }
     }
 
-    const response = await fetch(env.RULESET_URL, {
-      cf: { cacheTtl: 3600 }
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to fetch RULESET_URL ${env.RULESET_URL}: ${response.status}`);
+    const refreshResult = await refreshRulesetCache(env, { reason: 'request', force: true });
+    if (refreshResult.rulesData) {
+      return refreshResult.rulesData;
     }
 
-    const contentType = response.headers.get('content-type') || '';
-    let rulesData = {};
-
-    if (contentType.includes('application/json') || env.RULESET_URL.endsWith('.json')) {
-      // Handle manifest.json format
-      const manifest = await response.json();
-
-      if (manifest.sites_aggregated_yaml || manifest.sites_aggregated_json) {
-        // Load rules from new manifest format
-        rulesData = await loadRulesFromNewManifest(manifest, env);
-      } else if (manifest.sites_js_url || manifest.sites_json_url || manifest.sites_updated_url) {
-        // Load rules from legacy manifest URLs
-        rulesData = await loadRulesFromManifest(manifest, env);
-      } else {
-        // Direct JSON rules
-        rulesData = manifest;
-      }
-    } else if (contentType.includes('text/yaml') || contentType.includes('application/yaml') || env.RULESET_URL.endsWith('.yaml') || env.RULESET_URL.endsWith('.yml')) {
-      // Handle YAML format (aggregated ruleset)
-      const yamlText = await response.text();
-      rulesData = parseYamlRules(yamlText);
-    } else {
-      console.warn('Unknown RULESET_URL format, treating as JSON');
-      rulesData = await response.json();
-    }
-
-    // Cache the rules
-    if (env.CONFIG_KV) {
-      await env.CONFIG_KV.put(cacheKey, JSON.stringify({
-        data: rulesData,
-        timestamp: Date.now()
-      }), { expirationTtl: RULES_CACHE_TTL });
-    }
-
-    return rulesData;
+    throw new Error('Failed to load ruleset data after refresh');
   } catch (error) {
     console.error('Error loading rules from RULESET_URL:', error);
     throw error; // Re-throw to fail fast without fallback
@@ -365,7 +1557,7 @@ function aggregateRules(baseSites, updatedSites, customSites) {
       delete finalRules[name]; // Remove from final ruleset
       console.log(`Deleted rule via updates: ${name}`);
     } else {
-      finalRules[name] = { ...finalRules[name], ...rule }; // Add/modify
+      finalRules[name] = rule; // Replace rule (extension precedence)
     }
   }
 
@@ -375,7 +1567,7 @@ function aggregateRules(baseSites, updatedSites, customSites) {
       delete finalRules[name]; // User can delete any rule
       console.log(`Deleted rule via custom: ${name}`);
     } else {
-      finalRules[name] = { ...finalRules[name], ...rule }; // User overrides
+      finalRules[name] = rule; // Replace with user rule
     }
   }
 
@@ -386,6 +1578,8 @@ function aggregateRules(baseSites, updatedSites, customSites) {
  * Get aggregated rules (cached for performance)
  */
 async function getAggregatedRules(env) {
+  await maybeRefreshInMemoryRules(env);
+
   // Return cached rules if still valid
   if (aggregatedRules && rulesLastUpdated &&
       (Date.now() - rulesLastUpdated) < RULES_CACHE_TTL) {
@@ -414,43 +1608,23 @@ async function getAggregatedRules(env) {
 }
 
 /**
- * Find rule for a specific domain
- */
-function findRuleForDomain(domain, rules) {
-  // Direct domain match first
-  for (const [name, rule] of Object.entries(rules)) {
-    if (rule.domain === domain) {
-      return rule;
-    }
-  }
-
-  // Try subdomain matching (e.g., www.example.com matches example.com)
-  const baseDomain = domain.replace(/^www\./, '');
-  for (const [name, rule] of Object.entries(rules)) {
-    if (rule.domain === baseDomain || domain.endsWith(`.${rule.domain}`)) {
-      return rule;
-    }
-  }
-
-  return null;
-}
-
-/**
  * Apply Chrome Extension rule processing (Phase 4)
  * Handles cookies, content blocking, and HTML modification
  */
-async function applyChromExtensionRules(content, targetURL, response, rule) {
+async function applyChromExtensionRules(content, targetURL, response, rule, env, globalRegexes = []) {
   const url = new URL(targetURL);
+  const contentType = response.headers.get('Content-Type') || 'text/html';
+  const isHtml = contentType.includes('text/html');
 
   // Default processing result
   let processedContent = content;
   const responseHeaders = {
-    'Content-Type': response.headers.get('Content-Type') || 'text/html',
+    'Content-Type': contentType,
     'Cache-Control': 'public, max-age=300'
   };
 
   // Apply URL rewriting for HTML content (keep our fix for CSS)
-  if (response.headers.get('Content-Type')?.includes('text/html')) {
+  if (isHtml) {
     processedContent = rewriteHTMLBasic(processedContent, url.host);
   }
 
@@ -470,62 +1644,164 @@ async function applyChromExtensionRules(content, targetURL, response, rule) {
     remove_cookies_select_drop: rule.remove_cookies_select_drop
   });
 
-  // Chrome Extension Rule Processing:
+  // Cookie Management
+  const setCookieHeader = response.headers.get('Set-Cookie');
+  const filteredSetCookie = filterSetCookieHeaders(setCookieHeader, rule);
+  if (filteredSetCookie) {
+    responseHeaders['Set-Cookie'] = filteredSetCookie;
+  }
 
-  // 1. Cookie Management
-  if (rule.allow_cookies === 1) {
-    // Allow cookies - preserve Set-Cookie headers from response
-    const setCookieHeader = response.headers.get('Set-Cookie');
-    if (setCookieHeader) {
-      responseHeaders['Set-Cookie'] = setCookieHeader;
+  // Inline JS blocking via CSP (when rule matches URL)
+  if (rule.block_js_inline) {
+    const regex = buildRegex(rule.block_js_inline, rule.domain);
+    if (regex && regex.test(targetURL)) {
+      const existingCsp = response.headers.get('Content-Security-Policy');
+      if (!existingCsp || !existingCsp.includes('script-src')) {
+        responseHeaders['Content-Security-Policy'] = existingCsp
+          ? `${existingCsp}; script-src *`
+          : 'script-src *';
+      }
     }
   }
 
-  // 2. Remove specific cookies (remove_cookies_select_drop)
-  if (rule.remove_cookies_select_drop && Array.isArray(rule.remove_cookies_select_drop)) {
-    // This would be applied via request headers modification
-    // For now, log the cookies that should be removed
-    console.log(`Would remove cookies: ${rule.remove_cookies_select_drop.join(', ')}`);
-  }
-
-  // 3. Content Sanitization Flag
-  if (rule.cs_dompurify === 1) {
-    console.log('Content marked for DOMPurify sanitization');
-    // In Chrome extension, this triggers DOMPurify.sanitize()
-    // For now, we'll just note that sanitization should be applied
+  if (rule.cs_dompurify) {
     responseHeaders['X-Content-Sanitized'] = 'true';
   }
 
-  // 4. Block Regex Processing
-  if (rule.block_regex) {
-    // In Chrome extension, this blocks network requests matching the regex
-    // For our proxy, we can't block already-fetched content, but we can log
-    console.log('Rule has blocking regex:', rule.block_regex);
-
-    // Add a header to indicate blocked patterns
-    responseHeaders['X-Blocked-Patterns'] = 'applied';
+  if (!isHtml) {
+    return {
+      content: processedContent,
+      headers: responseHeaders
+    };
   }
 
-  // 5. Content Modifications
-  if (response.headers.get('Content-Type')?.includes('text/html')) {
-    // Apply any HTML-specific rule modifications
+  const headSnippets = [];
+  if (rule.cs_clear_lclstrg) {
+    headSnippets.push('<script>try{localStorage.clear();sessionStorage.clear();}catch(e){}</script>');
+  }
 
-    // Remove paywall-related scripts/elements (basic approach)
-    if (rule.allow_cookies === 1) {
-      // Remove common paywall indicators
-      processedContent = processedContent.replace(
-        /<script[^>]*(?:paywall|subscription|premium)[^>]*>.*?<\/script>/gis, ''
-      );
+  const rewriter = new HTMLRewriter();
 
-      // Remove paywall overlay divs
-      processedContent = processedContent.replace(
-        /<div[^>]*(?:paywall|overlay|modal)[^>]*>.*?<\/div>/gis, ''
-      );
+  const csActions = expandCsCodeActions(rule.cs_code || []);
+  registerCsCodeHandlers(rewriter, csActions, headSnippets);
+
+  if (headSnippets.length) {
+    rewriter.on('head', {
+      element(element) {
+        for (const snippet of headSnippets) {
+          element.append(snippet, { html: true });
+        }
+      }
+    });
+  }
+
+  registerBlockedResourceHandlers(rewriter, rule, targetURL, globalRegexes);
+
+  if (rule.block_js_inline) {
+    const regex = buildRegex(rule.block_js_inline, rule.domain);
+    if (regex && regex.test(targetURL)) {
+      rewriter.on('script:not([src])', {
+        element(element) {
+          element.remove();
+        }
+      });
     }
   }
 
+  if (rule.add_ext_link && rule.add_ext_link_type) {
+    const [paywallSel, articleSel] = splitRuleSelectors(rule.add_ext_link);
+    if (paywallSel) {
+      rewriter.on(paywallSel, {
+        element(element) {
+          element.remove();
+        }
+      });
+    }
+    if (articleSel) {
+      const externalHtml = buildExternalLinkHtml(targetURL, rule.add_ext_link_type);
+      rewriter.on(articleSel, {
+        element(element) {
+          element.prepend(externalHtml, { html: true });
+        }
+      });
+    }
+  }
+
+  let jsonInjection = buildJsonLdInjection(processedContent, rule);
+  if (!jsonInjection) {
+    jsonInjection = buildNextDataInjection(processedContent, rule);
+  }
+  if (!jsonInjection) {
+    jsonInjection = buildSourceJsonInjection(processedContent, rule);
+  }
+  if (!jsonInjection) {
+    jsonInjection = await buildJsonUrlInjection(processedContent, rule, url);
+  }
+
+  if (jsonInjection) {
+    if (jsonInjection.paywallSelector) {
+      rewriter.on(jsonInjection.paywallSelector, {
+        element(element) {
+          element.remove();
+        }
+      });
+    }
+    if (jsonInjection.articleSelector) {
+      rewriter.on(jsonInjection.articleSelector, {
+        element(element) {
+          if (jsonInjection.append) {
+            element.append(jsonInjection.html, { html: true });
+          } else {
+            element.setInnerContent(jsonInjection.html, { html: true });
+          }
+        }
+      });
+    }
+  }
+
+  if (rule.ld_archive_is) {
+    const parts = splitRuleSelectors(rule.ld_archive_is);
+    const paywallSel = parts[0];
+    const articleSel = parts[1];
+    if (paywallSel) {
+      rewriter.on(paywallSel, {
+        element(element) {
+          element.remove();
+        }
+      });
+    }
+    if (articleSel) {
+      const externalHtml = buildExternalLinkHtml(targetURL, 'archive.is');
+      rewriter.on(articleSel, {
+        element(element) {
+          element.prepend(externalHtml, { html: true });
+        }
+      });
+    }
+  }
+
+  if (rule.amp_unhide) {
+    rewriter.on('[amp-access-hide]', {
+      element(element) {
+        element.removeAttribute('amp-access-hide');
+        const existing = element.getAttribute('style') || '';
+        element.setAttribute('style', `${existing} display:block !important;`);
+      }
+    });
+    rewriter.on('[subscriptions-section="content"]', {
+      element(element) {
+        const existing = element.getAttribute('style') || '';
+        element.setAttribute('style', `${existing} display:block !important;`);
+      }
+    });
+  }
+
+  const transformed = await rewriter
+    .transform(new Response(processedContent, { headers: { 'Content-Type': 'text/html' } }))
+    .text();
+
   return {
-    content: processedContent,
+    content: transformed,
     headers: responseHeaders
   };
 }
@@ -535,7 +1811,7 @@ const STATIC_ASSETS = {
   '/': 'index.html',
   '/index.html': 'index.html',
   '/styles.css': 'styles.css',
-  '/logo.svg': 'logo.svg',
+  '/ladder.svg': 'ladder.svg',
   '/share-icon.svg': 'share-icon.svg',
   '/wasm_exec.js': 'wasm_exec.js'
 };
@@ -698,20 +1974,47 @@ async function initWasm(env) {
   if (env && env.X_FORWARDED_FOR) {
     globalThis.X_FORWARDED_FOR_ENV = env.X_FORWARDED_FOR;
   }
+  if (env && env.RULESET_URL) {
+    globalThis.RULESET_URL = env.RULESET_URL;
+  }
 
   // Create Go instance
   goInstance = new Go();
 
   // Instantiate the WASM module
-  const instance = await WebAssembly.instantiate(wasm, goInstance.importObject);
+  const instantiated = await WebAssembly.instantiate(wasm, goInstance.importObject);
+  const instance = instantiated instanceof WebAssembly.Instance ? instantiated : instantiated.instance;
+  if (!instance) {
+    throw new Error('Failed to instantiate WASM module');
+  }
 
   // Start the Go program but don't wait for it to complete
   // The Go program will run in the background and set up the global functions
-  goInstance.run(instance);
+  let runPromise;
+  try {
+    runPromise = goInstance.run(instance);
+  } catch (error) {
+    console.error('Go WASM run failed:', error);
+    throw error;
+  }
+  if (runPromise && typeof runPromise.then === 'function') {
+    runPromise.catch((error) => {
+      console.error('Go WASM runtime failed:', error);
+    });
+  }
 
   wasmInstance = instance;
 
-  console.log('Ladderflare WASM initialized');
+  // Wait for handleRequest to be registered by the Go runtime
+  for (let attempt = 0; attempt < 50; attempt++) {
+    if (globalThis.handleRequest) {
+      console.log('Ladderflare WASM initialized');
+      return instance;
+    }
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+
+  console.warn('WASM initialized but handleRequest is still unavailable');
   return instance;
 }
 
@@ -789,7 +2092,7 @@ function callWasmHandler(method, path, headers) {
 /**
  * Fetch and process proxied content
  */
-async function fetchProxiedContent(targetURL, env) {
+async function fetchProxiedContent(targetURL, env, request, options = {}) {
   try {
     // Phase 5 Caching: Check cache first
     const cacheKey = `content_${encodeURIComponent(targetURL)}`;
@@ -808,34 +2111,18 @@ async function fetchProxiedContent(targetURL, env) {
     const url = new URL(targetURL);
     const rules = await getAggregatedRules(env);
     const matchingRule = findRuleForDomain(url.hostname, rules);
+    const globalRegexes = getGlobalBlockRegexesForDomain(rules, url.hostname);
+    const clientUserAgent = request?.headers?.get('User-Agent') || '';
 
-    // Build headers for the request with Chrome extension rule priority
-    const defaultUserAgent = 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
-    const userAgent = matchingRule?.useragent_custom ||
-                     env.USER_AGENT ||
-                     fetchInstructions.userAgent ||
-                     defaultUserAgent;
+    if (shouldBlockUrl(targetURL, matchingRule, globalRegexes)) {
+      return {
+        status: 403,
+        body: 'Blocked by ruleset',
+        headers: { 'Content-Type': 'text/plain' }
+      };
+    }
 
-    const headers = {
-      'User-Agent': userAgent,
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-      'Accept-Language': 'en-US,en;q=0.5',
-      'Accept-Encoding': 'gzip, deflate',
-      'DNT': '1',
-      'Connection': 'keep-alive',
-      'Upgrade-Insecure-Requests': '1'
-    };
-
-    // Add optional headers from WASM
-    if (fetchInstructions.referer) {
-      headers['Referer'] = fetchInstructions.referer;
-    }
-    if (fetchInstructions.xForwardedFor) {
-      headers['X-Forwarded-For'] = fetchInstructions.xForwardedFor;
-    }
-    if (fetchInstructions.cookie) {
-      headers['Cookie'] = fetchInstructions.cookie;
-    }
+    const headers = resolveRequestHeaders(matchingRule, env, url, clientUserAgent, fetchInstructions);
 
     // Fetch the target URL
     const response = await fetch(targetURL, {
@@ -855,12 +2142,72 @@ async function fetchProxiedContent(targetURL, env) {
 
     console.log(`Processing ${url.hostname}, found rule: ${matchingRule ? 'YES' : 'NO'}`);
 
+    if (matchingRule?.ld_archive_is) {
+      const archiveSnapshot = await fetchArchiveSnapshot(targetURL);
+      if (archiveSnapshot && archiveSnapshot.content) {
+        const archiveBody = archiveSnapshot.contentType.includes('text/html')
+          ? rewriteHTMLBasic(archiveSnapshot.content, archiveSnapshot.host)
+          : archiveSnapshot.content;
+
+        const archiveResult = {
+          status: 200,
+          body: archiveBody,
+          headers: {
+            'Content-Type': archiveSnapshot.contentType,
+            'Cache-Control': 'public, max-age=300',
+            'X-Archive-Source': archiveSnapshot.url
+          }
+        };
+
+        await setCachedContent(env, cacheKey, archiveResult, 120);
+        return archiveResult;
+      }
+    }
+
+    if (!options.ampAttempt && matchingRule?.amp_redirect) {
+      const ampLinkMatch = content.match(/<link[^>]*rel=["']amphtml["'][^>]*href=["']([^"']+)["'][^>]*>/i);
+      let ampUrl = ampLinkMatch ? ampLinkMatch[1] : null;
+
+      const parts = splitRuleSelectors(matchingRule.amp_redirect);
+      if (parts.length > 1 && parts[1]) {
+        ampUrl = parts[1];
+        if (ampUrl.includes('{path}')) {
+          ampUrl = ampUrl.replace('{path}', url.pathname).replace(/\/\//g, '/');
+        }
+        if (ampUrl.includes('{host}')) {
+          ampUrl = 'https://' + ampUrl.replace('{host}', url.hostname.replace('www.', ''));
+        }
+      }
+
+      if (ampUrl) {
+        let resolvedAmpUrl = ampUrl;
+        try {
+          resolvedAmpUrl = new URL(ampUrl, url.origin).toString();
+        } catch (error) {
+          resolvedAmpUrl = ampUrl;
+        }
+
+        if (resolvedAmpUrl !== targetURL) {
+          try {
+            const ampResponse = await fetch(resolvedAmpUrl, { headers });
+          if (ampResponse.ok) {
+            content = await ampResponse.text();
+          }
+          } catch (error) {
+            console.warn('AMP fetch failed:', error);
+          }
+        }
+      }
+    }
+
     // Apply Chrome extension rule processing
     const processedResult = await applyChromExtensionRules(
       content,
       targetURL,
       response,
-      matchingRule
+      matchingRule,
+      env,
+      globalRegexes
     );
 
     const result = {
@@ -1090,7 +2437,8 @@ export default {
           },
           rules: {
             embedded_count: globalThis.getRulesetDomains ? globalThis.getRulesetDomains().length : 0,
-            version: 'static-embedded'
+            version: rulesetVersion || 'unknown',
+            source: env.RULESET_URL || 'embedded'
           },
           version: env.WORKER_VERSION || 'development'
         };
@@ -1258,7 +2606,7 @@ export default {
       // Handle static assets (unless DISABLE_FORM is true for form assets)
       if (STATIC_ASSETS[pathname]) {
         // Check if DISABLE_FORM is enabled and this is a form-related asset
-        if (env.DISABLE_FORM === 'true' && (pathname === '/' || pathname === '/index.html' || pathname === '/styles.css' || pathname === '/logo.svg' || pathname === '/share-icon.svg')) {
+        if (env.DISABLE_FORM === 'true' && (pathname === '/' || pathname === '/index.html' || pathname === '/styles.css' || pathname === '/ladder.svg' || pathname === '/share-icon.svg')) {
           return new Response('Form disabled', {
             status: 404,
             headers: { 'Content-Type': 'text/plain' }
@@ -1552,10 +2900,13 @@ export default {
           // Clear cache
           rulesLastUpdated = 0;
           aggregatedRules = null;
+          rulesetVersion = null;
 
-          // Clear KV cache for updated rules
-          if (env.CONFIG_KV) {
-            await env.CONFIG_KV.delete('sites_updated');
+          // Clear KV cache for ruleset and metadata
+          if (env.CONFIG_KV && env.RULESET_URL) {
+            const keys = getRulesetCacheKeys(env.RULESET_URL);
+            await env.CONFIG_KV.delete(keys.dataKey);
+            await env.CONFIG_KV.delete(keys.metaKey);
           }
 
           // Force reload
@@ -1686,7 +3037,8 @@ export default {
       await trackRequest(env, {});
 
       // Try to call the WASM handler
-      const wasmResult = callWasmHandler(method, pathname, request.headers) || {};
+      const wasmPath = `${pathname}${url.search || ''}`;
+      const wasmResult = callWasmHandler(method, wasmPath, request.headers) || {};
 
       // Check if this is a proxy request that needs fetching
       if (wasmResult.needsFetch && wasmResult.proxyURL) {
@@ -1699,7 +3051,7 @@ export default {
           });
         }
 
-        const proxyResult = await fetchProxiedContent(wasmResult.proxyURL, env);
+        const proxyResult = await fetchProxiedContent(wasmResult.proxyURL, env, request);
 
         // Convert proxy result to Response
         const responseHeaders = new Headers();
@@ -1753,5 +3105,15 @@ export default {
         }
       });
     }
+  },
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(
+      refreshRulesetCache(env, {
+        reason: `cron:${event.cron || 'scheduled'}`,
+        force: false
+      }).catch((error) => {
+        console.error('Scheduled ruleset refresh failed:', error);
+      })
+    );
   }
 };
