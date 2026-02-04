@@ -1,5 +1,5 @@
 <p align="center">
-    <img src="public/logo.svg" width="100px">
+  <img src="public/ladder.svg" width="100" alt="Ladderflare logo">
 </p>
 
 <h1 align="center">Ladderflare</h1>
