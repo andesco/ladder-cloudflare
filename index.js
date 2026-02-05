@@ -258,6 +258,59 @@ async function fetchProxiedContent(targetURL) {
 }
 
 /**
+ * Fetch raw proxied content without rule processing
+ */
+async function fetchRawContent(targetURL, requestHeaders) {
+  try {
+    const headers = {
+      'User-Agent': globalThis.USER_AGENT_ENV || 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+      'X-Forwarded-For': globalThis.X_FORWARDED_FOR_ENV || '66.249.66.1'
+    };
+
+    const referer = requestHeaders && requestHeaders.get ? requestHeaders.get('Referer') || requestHeaders.get('referer') : '';
+    if (referer) {
+      headers['Referer'] = referer;
+    }
+
+    const response = await fetch(targetURL, {
+      headers,
+      cf: {
+        cacheTtl: 300,
+        cacheEverything: true
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    return {
+      status: response.status,
+      body: response.body,
+      headers: copyResponseHeaders(response)
+    };
+  } catch (error) {
+    console.error('Error fetching raw content:', error);
+    return {
+      status: 500,
+      body: `Proxy error: ${error.message}`,
+      headers: { 'Content-Type': 'text/plain' }
+    };
+  }
+}
+
+/**
+ * Copy headers from a Response into a plain object
+ */
+function copyResponseHeaders(response) {
+  const headers = {};
+  response.headers.forEach((value, key) => {
+    headers[key] = value;
+  });
+  return headers;
+}
+
+/**
  * Basic HTML rewriting (JavaScript version)
  */
 function rewriteHTMLBasic(content, originalHost) {
@@ -492,7 +545,10 @@ export default {
           });
         }
 
-        const proxyResult = await fetchProxiedContent(wasmResult.proxyURL);
+        const responseType = wasmResult.responseType || 'proxy';
+        const proxyResult = responseType === 'raw'
+          ? await fetchRawContent(wasmResult.proxyURL, request.headers)
+          : await fetchProxiedContent(wasmResult.proxyURL);
 
         // Convert proxy result to Response
         const responseHeaders = new Headers();
@@ -507,6 +563,32 @@ export default {
           for (const [key, value] of Object.entries(proxyResult.headers)) {
             responseHeaders.set(key, value);
           }
+        }
+
+        if (responseType === 'api') {
+          const content = typeof proxyResult.body === 'string'
+            ? proxyResult.body
+            : proxyResult.body
+              ? await new Response(proxyResult.body).text()
+              : '';
+
+          const apiPayload = {
+            url: wasmResult.proxyURL,
+            status: proxyResult.status || 200,
+            content_length: content.length,
+            content
+          };
+
+          if (proxyResult.headers && typeof proxyResult.headers === 'object') {
+            apiPayload.headers = proxyResult.headers;
+          }
+
+          responseHeaders.set('Content-Type', 'application/json; charset=utf-8');
+
+          return new Response(JSON.stringify(apiPayload), {
+            status: 200,
+            headers: responseHeaders
+          });
         }
 
         return new Response(proxyResult.body || '', {

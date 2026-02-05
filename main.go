@@ -118,6 +118,50 @@ func handleRequest(this js.Value, args []js.Value) interface{} {
 
 	// Handle special endpoints
 	switch {
+	case strings.HasPrefix(path, "/api/"):
+		targetPath := strings.TrimPrefix(path, "/api/")
+		targetURL, err := extractURL(targetPath, requestHeaders)
+		if err != nil {
+			return createErrorResponse(400, fmt.Sprintf("Invalid URL: %s", err.Error()))
+		}
+
+		if method != "GET" {
+			return createErrorResponse(405, "Method Not Allowed")
+		}
+
+		result := js.Global().Get("Object").New()
+		result.Set("status", 200)
+		result.Set("proxyURL", targetURL)
+		result.Set("needsFetch", true)
+		result.Set("responseType", "api")
+
+		headers := js.Global().Get("Object").New()
+		headers.Set("Content-Type", "application/json")
+		result.Set("headers", headers)
+
+		return result
+	case strings.HasPrefix(path, "/raw/"):
+		targetPath := strings.TrimPrefix(path, "/raw/")
+		targetURL, err := extractURL(targetPath, requestHeaders)
+		if err != nil {
+			return createErrorResponse(400, fmt.Sprintf("Invalid URL: %s", err.Error()))
+		}
+
+		if method != "GET" {
+			return createErrorResponse(405, "Method Not Allowed")
+		}
+
+		result := js.Global().Get("Object").New()
+		result.Set("status", 200)
+		result.Set("proxyURL", targetURL)
+		result.Set("needsFetch", true)
+		result.Set("responseType", "raw")
+
+		headers := js.Global().Get("Object").New()
+		headers.Set("Content-Type", "text/plain")
+		result.Set("headers", headers)
+
+		return result
 	case path == "/test":
 		if testURL := getRandomTestURL(); testURL != "" {
 			return createRedirectResponse("/" + testURL)
