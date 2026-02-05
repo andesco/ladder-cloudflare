@@ -79,6 +79,14 @@ func proxyRequest(targetURL string, requestHeaders map[string]string) map[string
 	// Apply headers from rule and defaults
 	applyRequestHeaders(req, rule, requestHeaders)
 
+	// Capture request headers for API responses
+	requestHeadersOut := make(map[string]string)
+	for key, values := range req.Header {
+		if len(values) > 0 {
+			requestHeadersOut[key] = values[0]
+		}
+	}
+
 	// Log URL if enabled
 	if getenv("LOG_URLS", "true") == "true" {
 		fmt.Printf("Proxying: %s\n", targetURL)
@@ -109,10 +117,12 @@ func proxyRequest(targetURL string, requestHeaders map[string]string) map[string
 
 	// Prepare response headers
 	responseHeaders := make(map[string]string)
+	originHeaders := make(map[string]string)
 
 	// Copy important headers from original response
 	for key, values := range resp.Header {
 		if len(values) > 0 {
+			originHeaders[key] = values[0]
 			// Remove CORS and security headers that might interfere
 			lowerKey := strings.ToLower(key)
 			if !strings.Contains(lowerKey, "cors") &&
@@ -128,12 +138,21 @@ func proxyRequest(targetURL string, requestHeaders map[string]string) map[string
 		responseHeaders["Content-Type"] = contentType
 	}
 
+	// Apply CSP header if specified in rule
+	if rule != nil && rule.Headers.CSP != "" {
+		responseHeaders["Content-Security-Policy"] = rule.Headers.CSP
+		originHeaders["Content-Security-Policy"] = rule.Headers.CSP
+	}
+
 	// Add CORS headers to allow access
 	responseHeaders["Access-Control-Allow-Origin"] = "*"
 	responseHeaders["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
 	responseHeaders["Access-Control-Allow-Headers"] = "*"
 
-	return createResponse(resp.StatusCode, string(body), responseHeaders)
+	response := createResponse(resp.StatusCode, string(body), responseHeaders)
+	response["requestHeaders"] = requestHeadersOut
+	response["originHeaders"] = originHeaders
+	return response
 }
 
 // proxyRequestRaw performs a raw proxy request without rule application

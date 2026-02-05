@@ -20,7 +20,6 @@ the complete package is deployed to Cloudflare Workers with support for the user
 
 The result is a **fast bypass proxy** that successfully circumvents many web restrictions through sophisticated rule-based processing.
 
-
 ## Deploy to Cloudflare
 
 ### Cloudflare Dashboard
@@ -38,23 +37,31 @@ cd ladderflare
 npm run build
 wrangler deploy
 ```
+
+> [!IMPORTANT]
+> To secure your worker from public acces use either Cloudflare Access or set `USERPASS`.
    
 ## Usage
 
-Visit your worker and enter a URL: \
+Visit your worker and enter a URL:
 `https://ladder.{subdomain}.workers.dev`
 
-Directly appended a URL to the end of Ladderflare’s hostname: \
+Directly append a URL to the end of Ladderflare’s hostname:
 `https://ladder.{subdomain}.workers.dev/https://example.com`
 
-Create a [bookmarklet](https://wikipedia.org/wiki/Bookmarklet) with the following URL: \
+Create a [bookmarklet](https://wikipedia.org/wiki/Bookmarklet) with the following URL:
 `javascript:window.location.href="https://ladder.{subdomain}.workers.dev/"+location.href`
 
-Add a shortcut to the share sheet on macOS and iOS: \
+Add a shortcut to the share sheet on macOS and iOS:
 [`andesco/ladder-shortcut`][ladder-shortcut]
 
+### Limitations
 
-## Configuration
+* Some sites do not expose content to search engines, which means the proxy cannot access the content.
+* Certain sites may display missing images or encounter formatting issues due to JavaScript- or CSS-driven rendering.
+
+
+### Configuration
 
 The worker is configured using environment variables. Set these in `wrangler.toml` file or in the Cloudflare Dashboard:
 
@@ -66,9 +73,6 @@ The worker is configured using environment variables. Set these in `wrangler.tom
 - **`ALLOWED_DOMAINS`** `{domain},{domain}`
 - **`ALLOWED_DOMAINS_RULESET`** `false`
 
-> [!NOTE]
-> `ALLOWED_DOMAINS` and `ALLOWED_DOMAINS_RULESET` are joined together. If both are empty, no limitations are applied.
-
 Ladderflare does not support these legacy variables:
 
 - `FORM_PATH`
@@ -76,11 +80,31 @@ Ladderflare does not support these legacy variables:
 - `PORT`
 - `RULESET`
 
-> [!IMPORTANT]
+> [!tip]
 > Ladderflare does not log fetched URLs. Consider enabling Cloudflare Analytics to log usage.
 
+### Ruleset Examples
+
+See example rules and the canonical ruleset in [`everywall/ladder-rules`][ladder-rules] and [`ruleset.yaml`][ruleset-examples].
 
 ## Development
+
+### How It Works
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Worker as Ladderflare Worker
+    participant WASM as Ladder (WASM)
+    participant Origin as Website
+
+    Client->>Worker: GET /{url}
+    Worker-->>WASM: apply RequestModifications (ruleset)
+    WASM->>Origin: fetch URL
+    Origin-->>WASM: 200 OK (HTML/assets)
+    WASM-->>Worker: apply ResultModifications (ruleset)
+    Worker-->>Client: 200 OK
+```
 
 ### Build Commands
 
@@ -88,17 +112,17 @@ Ladderflare does not support these legacy variables:
 npm run build:rules   # download latest ruleset from ladder-rules repository
 npm run build:wasm    # compile WebAssembly binary
 npm run build
-npm run dev:local     # deploy locally using wrangler.local.toml
+npm run dev:local     # run locally using wrangler.local.toml
 npm run deploy:local  # deploy using wrangler.local.toml
 npm run deploy
 ```
 
 ### WebAssembly Implementation
 
-- **no dependencies**: Go stdlib compilation for minimal WASM binary size (3.0MB)
-- **custom YAML parser**: simplified parser avoids heavy dependencies in WASM
-- **JavaScript interoperability**: `syscall/js` bridge for fetch() and DOM manipulation
-- **edge optimization**: Cloudflare Workers-specific optimizations for performance
+- **rule parsing**: `gopkg.in/yaml.v3` loads the embedded ruleset
+- **HTML manipulation**: `goquery` applies DOM-level modifications in WASM
+- **JavaScript interoperability**: `syscall/js` bridges WASM to the Worker, while fetch runs in `index.js`
+- **edge deployment**: tuned for Cloudflare Workers execution
 
 ### WebAssembly Build Process
 
@@ -106,13 +130,13 @@ npm run deploy
 2. `GOOS=js GOARCH=wasm go build -ldflags="-s -w" -tags=wasm`
 3. `go:embed` embedds rules directly into WASM binary
 
-### Interface Updates
-
-- `form.html` has been renamed to `index.html`
-   - add Apple Shortcut
-   - save bookmarklet
-- `styles.css` is served without dependencies
-- `/test` endpoint
+```mermaid
+flowchart LR
+    Ruleset[ruleset.yaml] --> Build[WASM build + embed]
+    Ladder[ladder Go code] --> Build
+    Build --> Worker[Cloudflare Worker bundle]
+    Worker --> Deploy[Workers deployment]
+```
 
 ### Endpoints
 
@@ -124,13 +148,12 @@ npm run deploy
 
 - **RULESET**: `ladder.{subdomain}.workers.dev/ruleset`
 
-&zwnj;
-
 ---
 
 Ladderflare is licensed under the [MIT License](LICENSE).
 
 [ladder]: https://github.com/everywall/ladder
 [ladder-rules]: https://github.com/everywall/ladder-rules
+[ruleset-examples]: https://github.com/everywall/ladder-rules/blob/main/ruleset.yaml
 [ladder-shortcut]: https://github.com/andesco/ladder-shortcut
 [ladderflare]: https://github.com/andesco/ladder-cloudflare

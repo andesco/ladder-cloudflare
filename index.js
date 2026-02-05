@@ -167,7 +167,7 @@ async function fetchProxiedContent(targetURL) {
     }
 
     // Build headers for the request
-    const headers = {
+    const requestHeaders = {
       'User-Agent': fetchInstructions.userAgent || 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
       'Accept-Language': 'en-US,en;q=0.5',
@@ -179,20 +179,20 @@ async function fetchProxiedContent(targetURL) {
 
     // Add optional headers from WASM
     if (fetchInstructions.referer) {
-      headers['Referer'] = fetchInstructions.referer;
+      requestHeaders['Referer'] = fetchInstructions.referer;
     }
     if (fetchInstructions.xForwardedFor) {
-      headers['X-Forwarded-For'] = fetchInstructions.xForwardedFor;
+      requestHeaders['X-Forwarded-For'] = fetchInstructions.xForwardedFor;
     }
     if (fetchInstructions.cookie) {
-      headers['Cookie'] = fetchInstructions.cookie;
+      requestHeaders['Cookie'] = fetchInstructions.cookie;
     }
 
     const fetchURL = fetchInstructions.url || targetURL;
 
     // Fetch the target URL
     const response = await fetch(fetchURL, {
-      headers,
+      headers: requestHeaders,
       cf: {
         // Cloudflare-specific options
         cacheTtl: 300, // Cache for 5 minutes
@@ -205,6 +205,7 @@ async function fetchProxiedContent(targetURL) {
     }
 
     let content = await response.text();
+    const originHeaders = copyResponseHeaders(response);
 
     // Process content through WASM (applies rules, injections, regex)
     const processedResult = globalThis.processContent ? globalThis.processContent(content, targetURL) : null;
@@ -225,12 +226,15 @@ async function fetchProxiedContent(targetURL) {
       // Apply CSP header if specified in rule
       if (processedResult.csp) {
         responseHeaders['Content-Security-Policy'] = processedResult.csp;
+        originHeaders['Content-Security-Policy'] = processedResult.csp;
       }
 
       return {
         status: 200,
         body: content,
-        headers: responseHeaders
+        headers: responseHeaders,
+        requestHeaders,
+        originHeaders
       };
     } else {
       // Fallback to basic processing
@@ -243,7 +247,9 @@ async function fetchProxiedContent(targetURL) {
         headers: {
           'Content-Type': response.headers.get('Content-Type') || 'text/html',
           'Cache-Control': 'public, max-age=300'
-        }
+        },
+        requestHeaders,
+        originHeaders
       };
     }
 
@@ -255,6 +261,49 @@ async function fetchProxiedContent(targetURL) {
       headers: { 'Content-Type': 'text/plain' }
     };
   }
+}
+
+/**
+ * Copy headers from a Response into a plain object
+ */
+function copyResponseHeaders(response) {
+  const headers = {};
+  response.headers.forEach((value, key) => {
+    headers[key] = value;
+  });
+  return headers;
+}
+
+function headersObjectToList(headersObj) {
+  const list = [];
+  if (!headersObj || typeof headersObj !== 'object') {
+    return list;
+  }
+  for (const [key, value] of Object.entries(headersObj)) {
+    if (value === undefined || value === null) {
+      continue;
+    }
+    list.push({ key, value: String(value) });
+  }
+  return list;
+}
+
+/**
+ * Basic HTML rewriting (JavaScript version)
+ */
+function rewriteHTMLBasic(content, originalHost) {
+  const proxyPrefix = `/https://${originalHost}/`;
+
+  // Rewrite relative URLs
+  content = content.replace(/src="\/([^"]*)"/g, `src="${proxyPrefix}$1"`);
+  content = content.replace(/href="\/([^"]*)"/g, `href="${proxyPrefix}$1"`);
+  content = content.replace(/url\('\/([^']*)'\)/g, `url('${proxyPrefix}$1')`);
+  content = content.replace(/url\(\/([^)]*)\)/g, `url(${proxyPrefix}$1)`);
+
+  // Rewrite absolute URLs back to proxy
+  content = content.replace(new RegExp(`href="https://${originalHost.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g'), `href="/https://${originalHost}/`);
+
+  return content;
 }
 
 /**
@@ -297,35 +346,6 @@ async function fetchRawContent(targetURL, requestHeaders) {
       headers: { 'Content-Type': 'text/plain' }
     };
   }
-}
-
-/**
- * Copy headers from a Response into a plain object
- */
-function copyResponseHeaders(response) {
-  const headers = {};
-  response.headers.forEach((value, key) => {
-    headers[key] = value;
-  });
-  return headers;
-}
-
-/**
- * Basic HTML rewriting (JavaScript version)
- */
-function rewriteHTMLBasic(content, originalHost) {
-  const proxyPrefix = `/https://${originalHost}/`;
-
-  // Rewrite relative URLs
-  content = content.replace(/src="\/([^"]*)"/g, `src="${proxyPrefix}$1"`);
-  content = content.replace(/href="\/([^"]*)"/g, `href="${proxyPrefix}$1"`);
-  content = content.replace(/url\('\/([^']*)'\)/g, `url('${proxyPrefix}$1')`);
-  content = content.replace(/url\(\/([^)]*)\)/g, `url(${proxyPrefix}$1)`);
-
-  // Rewrite absolute URLs back to proxy
-  content = content.replace(new RegExp(`href="https://${originalHost.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g'), `href="/https://${originalHost}/`);
-
-  return content;
 }
 
 /**
@@ -572,16 +592,17 @@ export default {
               ? await new Response(proxyResult.body).text()
               : '';
 
+          const version = env.VERSION || '0.0.0';
           const apiPayload = {
-            url: wasmResult.proxyURL,
-            status: proxyResult.status || 200,
-            content_length: content.length,
-            content
+            version,
+            body: content,
+            request: {
+              headers: headersObjectToList(proxyResult.requestHeaders)
+            },
+            response: {
+              headers: headersObjectToList(proxyResult.originHeaders)
+            }
           };
-
-          if (proxyResult.headers && typeof proxyResult.headers === 'object') {
-            apiPayload.headers = proxyResult.headers;
-          }
 
           responseHeaders.set('Content-Type', 'application/json; charset=utf-8');
 
