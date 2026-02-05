@@ -31,17 +31,18 @@ func HandleAPI(method, targetURL string, headers map[string]string) map[string]i
 	// Proxy the request
 	response := proxyRequest(url, headers)
 
-	// For API endpoint, we want to return JSON metadata along with content
-	apiResponse := map[string]interface{}{
-		"url":            url,
-		"status":         response["status"],
-		"content_length": len(fmt.Sprintf("%v", response["body"])),
-		"content":        response["body"],
-	}
+	body := fmt.Sprintf("%v", response["body"])
+	version := getenv("VERSION", "0.0.0")
 
-	// Add headers if present
-	if responseHeaders, ok := response["headers"].(map[string]string); ok {
-		apiResponse["headers"] = responseHeaders
+	apiResponse := map[string]interface{}{
+		"version": version,
+		"body":    body,
+		"request": map[string]interface{}{
+			"headers": headersMapToList(response["requestHeaders"]),
+		},
+		"response": map[string]interface{}{
+			"headers": headersMapToList(response["originHeaders"]),
+		},
 	}
 
 	// Convert to JSON
@@ -55,4 +56,19 @@ func HandleAPI(method, targetURL string, headers map[string]string) map[string]i
 	return createResponse(200, string(jsonBytes), map[string]string{
 		"Content-Type": "application/json; charset=utf-8",
 	})
+}
+
+func headersMapToList(headers interface{}) []map[string]string {
+	list := []map[string]string{}
+	headerMap, ok := headers.(map[string]string)
+	if !ok {
+		return list
+	}
+	for key, value := range headerMap {
+		list = append(list, map[string]string{
+			"key":   key,
+			"value": value,
+		})
+	}
+	return list
 }
