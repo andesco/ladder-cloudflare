@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"ladderflare/pkg/ruleset"
 	"github.com/PuerkitoBio/goquery"
+	"ladderflare/pkg/ruleset"
 )
 
 // HandleProxy handles the main proxy functionality with full rule application
@@ -116,8 +116,8 @@ func proxyRequest(targetURL string, requestHeaders map[string]string) map[string
 			// Remove CORS and security headers that might interfere
 			lowerKey := strings.ToLower(key)
 			if !strings.Contains(lowerKey, "cors") &&
-			   !strings.Contains(lowerKey, "x-frame") &&
-			   !strings.Contains(lowerKey, "content-security-policy") {
+				!strings.Contains(lowerKey, "x-frame") &&
+				!strings.Contains(lowerKey, "content-security-policy") {
 				responseHeaders[key] = values[0]
 			}
 		}
@@ -266,9 +266,18 @@ func applyURLModifications(targetURL string, rule *ruleset.Rule) string {
 	if len(rule.URLMods.Query) > 0 {
 		query := parsedURL.Query()
 		for _, queryMod := range rule.URLMods.Query {
-			query.Set(queryMod.Key, queryMod.Value)
+			if queryMod.Value == "" {
+				query.Del(queryMod.Key)
+			} else {
+				query.Set(queryMod.Key, queryMod.Value)
+			}
 		}
 		parsedURL.RawQuery = query.Encode()
+	}
+
+	// Apply Google Cache if enabled
+	if rule.GoogleCache {
+		return "https://webcache.googleusercontent.com/search?q=cache:" + parsedURL.String()
 	}
 
 	return parsedURL.String()
@@ -291,6 +300,9 @@ func applyResponseModifications(body []byte, rule *ruleset.Rule, parsedURL *url.
 			}
 		}
 	}
+
+	// Rewrite HTML links to go through the proxy
+	bodyStr = rewriteHTML(bodyStr, parsedURL.Host)
 
 	// Apply injections
 	if len(rule.Injections) > 0 {
@@ -321,10 +333,105 @@ func applyResponseModifications(body []byte, rule *ruleset.Rule, parsedURL *url.
 		}
 	}
 
-	// Fix relative URLs to point through the proxy
-	bodyStr = fixRelativeURLs(bodyStr, parsedURL)
-
 	return []byte(bodyStr)
+}
+
+// rewriteHTML rewrites HTML content to proxy relative URLs using GoQuery
+func rewriteHTML(body, originalHost string) string {
+	// Parse HTML with GoQuery
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(body))
+	if err != nil {
+		// Fallback to string-based rewriting if parsing fails
+		return rewriteHTMLFallback(body, originalHost)
+	}
+
+	proxyPrefix := "/https://" + originalHost + "/"
+
+	// Rewrite image sources
+	doc.Find("img[src]").Each(func(i int, s *goquery.Selection) {
+		src, exists := s.Attr("src")
+		if exists && strings.HasPrefix(src, "/") && !strings.HasPrefix(src, "//") {
+			s.SetAttr("src", proxyPrefix+strings.TrimPrefix(src, "/"))
+		}
+	})
+
+	// Rewrite script sources
+	doc.Find("script[src]").Each(func(i int, s *goquery.Selection) {
+		src, exists := s.Attr("src")
+		if exists && strings.HasPrefix(src, "/") && !strings.HasPrefix(src, "//") {
+			s.SetAttr("src", proxyPrefix+strings.TrimPrefix(src, "/"))
+		}
+	})
+
+	// Rewrite link hrefs
+	doc.Find("a[href]").Each(func(i int, s *goquery.Selection) {
+		href, exists := s.Attr("href")
+		if exists {
+			if strings.HasPrefix(href, "/") && !strings.HasPrefix(href, "//") {
+				s.SetAttr("href", proxyPrefix+strings.TrimPrefix(href, "/"))
+			} else if strings.HasPrefix(href, "https://"+originalHost) {
+				// Convert absolute URLs back to proxy format
+				s.SetAttr("href", "/https://"+originalHost+"/"+strings.TrimPrefix(href, "https://"+originalHost+"/"))
+			}
+		}
+	})
+
+	// Rewrite link rel=stylesheet hrefs
+	doc.Find("link[href]").Each(func(i int, s *goquery.Selection) {
+		href, exists := s.Attr("href")
+		if exists && strings.HasPrefix(href, "/") && !strings.HasPrefix(href, "//") {
+			s.SetAttr("href", proxyPrefix+strings.TrimPrefix(href, "/"))
+		}
+	})
+
+	// Rewrite form actions
+	doc.Find("form[action]").Each(func(i int, s *goquery.Selection) {
+		action, exists := s.Attr("action")
+		if exists && strings.HasPrefix(action, "/") && !strings.HasPrefix(action, "//") {
+			s.SetAttr("action", proxyPrefix+strings.TrimPrefix(action, "/"))
+		}
+	})
+
+	// Get the modified HTML
+	html, err := doc.Html()
+	if err != nil {
+		// Fallback to string-based rewriting if serialization fails
+		return rewriteHTMLFallback(body, originalHost)
+	}
+
+	// Still need to handle CSS url() rewrites with string replacement since GoQuery doesn't parse CSS
+	html = strings.ReplaceAll(html, `url('/`, `url('`+proxyPrefix)
+	html = strings.ReplaceAll(html, `url(/`, `url(`+proxyPrefix)
+
+	return html
+}
+
+// rewriteHTMLFallback provides string-based rewriting as fallback
+func rewriteHTMLFallback(body, originalHost string) string {
+	// Rewrite relative URLs to go through proxy
+	proxyPrefix := "/https://" + originalHost + "/"
+
+	// Images
+	imagePattern := `<img\s+([^>]*\s+)?src="(/)([^"]*)"`
+	re := regexp.MustCompile(imagePattern)
+	body = re.ReplaceAllString(body, fmt.Sprintf(`<img $1src="%s$3"`, proxyPrefix))
+
+	// Scripts
+	scriptPattern := `<script\s+([^>]*\s+)?src="(/)([^"]*)"`
+	reScript := regexp.MustCompile(scriptPattern)
+	body = reScript.ReplaceAllString(body, fmt.Sprintf(`<script $1src="%s$3"`, proxyPrefix))
+
+	// Links
+	body = strings.ReplaceAll(body, `href="/`, `href="`+proxyPrefix)
+
+	// CSS urls
+	body = strings.ReplaceAll(body, `url('/`, `url('`+proxyPrefix)
+	body = strings.ReplaceAll(body, `url(/`, `url(`+proxyPrefix)
+
+	// Absolute URLs back to proxy
+	body = strings.ReplaceAll(body, `href="https://`+originalHost, `href="/https://`+originalHost+`/`)
+
+	return body
 }
 
 // fixRelativeURLs converts relative URLs to go through the proxy

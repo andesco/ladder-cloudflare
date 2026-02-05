@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -202,20 +203,46 @@ func (rs *Ruleset) FindRuleForDomain(domain string) *Rule {
 }
 
 // FindRuleForURL finds the appropriate rule for a given URL (domain + path matching)
-func (rs *Ruleset) FindRuleForURL(url string) *Rule {
-	// Simple implementation - extract domain from URL
-	// This could be enhanced to also match paths
-	if strings.HasPrefix(url, "http://") {
-		url = strings.TrimPrefix(url, "http://")
-	} else if strings.HasPrefix(url, "https://") {
-		url = strings.TrimPrefix(url, "https://")
+func (rs *Ruleset) FindRuleForURL(rawURL string) *Rule {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return nil
 	}
 
-	// Extract domain part
-	parts := strings.Split(url, "/")
-	if len(parts) > 0 {
-		domain := parts[0]
-		return rs.FindRuleForDomain(domain)
+	domain := parsedURL.Host
+	path := parsedURL.Path
+	if domain == "" {
+		return nil
+	}
+
+	for i := range *rs {
+		rule := &(*rs)[i]
+
+		domains := rule.Domains
+		if rule.Domain != "" {
+			domains = append(domains, rule.Domain)
+		}
+
+		for _, ruleDomain := range domains {
+			if ruleDomain == "" {
+				continue
+			}
+			if domain == ruleDomain || strings.HasSuffix(domain, "."+ruleDomain) {
+				if len(rule.Paths) > 0 {
+					matchesPath := false
+					for _, rulePath := range rule.Paths {
+						if strings.HasPrefix(path, rulePath) {
+							matchesPath = true
+							break
+						}
+					}
+					if !matchesPath {
+						continue
+					}
+				}
+				return rule
+			}
+		}
 	}
 
 	return nil

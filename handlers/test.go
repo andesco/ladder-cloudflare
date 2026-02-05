@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"fmt"
+	"math/rand"
+	"time"
 )
 
 // TestResult represents a single test result
@@ -18,6 +20,8 @@ type TestResponse struct {
 	Errors  int          `json:"errors"`
 	Results []TestResult `json:"results"`
 }
+
+var testRandom = rand.New(rand.NewSource(time.Now().UnixNano()))
 
 // HandleTest redirects to a random test URL for actual proxy testing
 func HandleTest(method, path string, headers map[string]string) map[string]interface{} {
@@ -56,8 +60,8 @@ func HandleTest(method, path string, headers map[string]string) map[string]inter
 		})
 	}
 
-	// Select the first valid test URL (could be randomized later)
-	selectedURL := validURLs[0]
+	// Select a random valid test URL
+	selectedURL := validURLs[testRandom.Intn(len(validURLs))]
 
 	// Create redirect response to proxy the test URL
 	redirectLocation := "/" + selectedURL

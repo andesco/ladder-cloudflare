@@ -34,14 +34,15 @@ async function downloadRuleset() {
 async function main() {
     try {
         const rulesetData = await downloadRuleset();
+        const normalizedRulesetData = rulesetData.replace(/ueser-agent:/g, 'user-agent:');
 
         // Write the ruleset to the output file
-        fs.writeFileSync(OUTPUT_FILE, rulesetData);
+        fs.writeFileSync(OUTPUT_FILE, normalizedRulesetData);
         console.log(`Ruleset downloaded and saved to: ${OUTPUT_FILE}`);
 
         // Parse the YAML to extract test URLs for validation
         const yaml = require('yaml');
-        const ruleset = yaml.parse(rulesetData);
+        const ruleset = yaml.parse(normalizedRulesetData);
 
         const testUrls = [];
         if (Array.isArray(ruleset)) {

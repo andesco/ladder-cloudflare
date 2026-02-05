@@ -6,6 +6,7 @@ yarn-error.log*
 .pnp/
 .pnp.js
 .pnp.cjs
+ladder/
 
 # Cloudflare
 .wrangler/

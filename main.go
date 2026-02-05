@@ -3,10 +3,12 @@ package main
 import (
 	_ "embed"
 	"fmt"
+	"math/rand"
 	"net/url"
 	"regexp"
 	"strings"
 	"syscall/js"
+	"time"
 
 	"github.com/PuerkitoBio/goquery"
 	"gopkg.in/yaml.v3"
@@ -19,6 +21,7 @@ var (
 	UserAgent    = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
 	ForwardedFor = "66.249.66.1"
 	parsedRules  RuleSet
+	random       = rand.New(rand.NewSource(time.Now().UnixNano()))
 )
 
 // Full-featured rule structures with yaml.v3 support (matching ladder/pkg/ruleset)
@@ -60,6 +63,11 @@ type Rule struct {
 		Prepend  string `yaml:"prepend,omitempty"`
 		Replace  string `yaml:"replace,omitempty"`
 	} `yaml:"injections,omitempty"`
+
+	Tests []struct {
+		URL  string `yaml:"url,omitempty"`
+		Test string `yaml:"test,omitempty"`
+	} `yaml:"tests,omitempty"`
 }
 
 func main() {
@@ -106,18 +114,21 @@ func handleRequest(this js.Value, args []js.Value) interface{} {
 
 	method := args[0].String()
 	path := args[1].String()
-	// headers := args[2] // Request headers from JavaScript
+	requestHeaders := jsHeadersToMap(args[2]) // Request headers from JavaScript
 
 	// Handle special endpoints
 	switch {
 	case path == "/test":
-		return createRedirectResponse("/https://www.ft.com/content/5348ec64-010e-40f4-a27e-6d1252a0c537")
+		if testURL := getRandomTestURL(); testURL != "" {
+			return createRedirectResponse("/" + testURL)
+		}
+		return createErrorResponse(404, "No test URLs available")
 	case path == "/ruleset":
 		return createRulesetResponse()
 	}
 
 	// Extract target URL from path
-	targetURL, err := extractURL(path)
+	targetURL, err := extractURL(path, requestHeaders)
 	if err != nil {
 		return createErrorResponse(400, fmt.Sprintf("Invalid URL: %s", err.Error()))
 	}
@@ -142,9 +153,14 @@ func handleRequest(this js.Value, args []js.Value) interface{} {
 }
 
 // extractURL extracts the target URL from the request path
-func extractURL(path string) (string, error) {
+func extractURL(path string, headers map[string]string) (string, error) {
 	// Remove leading slash
 	urlPath := strings.TrimPrefix(path, "/")
+
+	// URL decode the path if possible
+	if decoded, err := url.QueryUnescape(urlPath); err == nil {
+		urlPath = decoded
+	}
 
 	// Try to parse as URL
 	parsedURL, err := url.Parse(urlPath)
@@ -152,12 +168,59 @@ func extractURL(path string) (string, error) {
 		return "", fmt.Errorf("error parsing URL '%s': %v", urlPath, err)
 	}
 
-	// Ensure we have a scheme
+	// Resolve relative paths using referer
 	if parsedURL.Scheme == "" {
-		return "", fmt.Errorf("URL must include scheme (http/https): %s", urlPath)
+		referer := headers["referer"]
+		if referer == "" {
+			return "", fmt.Errorf("relative path requires referer header")
+		}
+
+		refererURL, err := url.Parse(referer)
+		if err != nil {
+			return "", fmt.Errorf("error parsing referer URL: %v", err)
+		}
+
+		realURL, err := url.Parse(strings.TrimPrefix(refererURL.Path, "/"))
+		if err != nil {
+			return "", fmt.Errorf("error parsing real URL from referer: %v", err)
+		}
+
+		relativePath := parsedURL.Path
+		if relativePath != "" && !strings.HasPrefix(relativePath, "/") {
+			relativePath = "/" + relativePath
+		}
+
+		fullURL := &url.URL{
+			Scheme:   realURL.Scheme,
+			Host:     realURL.Host,
+			Path:     relativePath,
+			RawQuery: parsedURL.RawQuery,
+		}
+
+		return fullURL.String(), nil
 	}
 
 	return parsedURL.String(), nil
+}
+
+// jsHeadersToMap converts a JS headers object into a Go map
+func jsHeadersToMap(headersVal js.Value) map[string]string {
+	headers := map[string]string{}
+	if headersVal.IsUndefined() || headersVal.IsNull() {
+		return headers
+	}
+
+	keys := js.Global().Get("Object").Call("keys", headersVal)
+	for i := 0; i < keys.Length(); i++ {
+		key := keys.Index(i).String()
+		value := headersVal.Get(key)
+		if value.IsUndefined() || value.IsNull() {
+			continue
+		}
+		headers[key] = value.String()
+	}
+
+	return headers
 }
 
 // fetchURL handles the actual HTTP fetching (called from JavaScript)
@@ -175,7 +238,7 @@ func fetchURL(this js.Value, args []js.Value) interface{} {
 	}
 
 	// Find matching rule for this domain
-	rule := findRuleForDomain(parsedURL.Host)
+	rule := findRuleForDomainAndPath(parsedURL.Host, parsedURL.Path)
 
 	// Apply URL modifications if present
 	finalURL := applyURLModifications(targetURL, rule)
@@ -196,7 +259,7 @@ func fetchURL(this js.Value, args []js.Value) interface{} {
 			result.Set("referer", rule.Headers.Referer)
 		}
 	} else {
-		result.Set("referer", parsedURL.Scheme + "://" + parsedURL.Host)
+		result.Set("referer", targetURL)
 	}
 
 	if rule.Headers.XForwardedFor != "" {
@@ -379,6 +442,28 @@ func getRulesetDomains(this js.Value, args []js.Value) interface{} {
 	return domains
 }
 
+// getRandomTestURL returns a random test URL from the parsed ruleset
+func getRandomTestURL() string {
+	testURLs := getTestURLs()
+	if len(testURLs) == 0 {
+		return ""
+	}
+	return testURLs[random.Intn(len(testURLs))]
+}
+
+// getTestURLs extracts all test URLs from the ruleset
+func getTestURLs() []string {
+	testURLs := make([]string, 0)
+	for _, rule := range parsedRules {
+		for _, test := range rule.Tests {
+			if test.URL != "" {
+				testURLs = append(testURLs, test.URL)
+			}
+		}
+	}
+	return testURLs
+}
+
 // processContent applies content modifications (injections + regex rules) using GoQuery
 func processContent(this js.Value, args []js.Value) interface{} {
 	if len(args) < 2 {
@@ -546,7 +631,6 @@ func parseRuleset() {
 	fmt.Printf("Successfully parsed %d rules from embedded YAML\n", len(parsedRules))
 }
 
-
 // findRuleForDomain finds the matching rule for a given domain and path
 func findRuleForDomain(domain string) Rule {
 	return findRuleForDomainAndPath(domain, "")
@@ -642,4 +726,3 @@ func applyURLModifications(targetURL string, rule Rule) string {
 
 	return parsedURL.String()
 }
-
