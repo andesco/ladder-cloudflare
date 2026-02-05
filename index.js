@@ -188,8 +188,10 @@ async function fetchProxiedContent(targetURL) {
       headers['Cookie'] = fetchInstructions.cookie;
     }
 
+    const fetchURL = fetchInstructions.url || targetURL;
+
     // Fetch the target URL
-    const response = await fetch(targetURL, {
+    const response = await fetch(fetchURL, {
       headers,
       cf: {
         // Cloudflare-specific options
@@ -376,8 +378,15 @@ function isDomainAllowed(url, env) {
   // Check ruleset domains if enabled
   if (allowedDomainsRuleset && globalThis.getRulesetDomains) {
     const rulesetDomains = globalThis.getRulesetDomains();
-    if (rulesetDomains && rulesetDomains.includes(domain)) {
-      return true;
+    if (rulesetDomains && Array.isArray(rulesetDomains)) {
+      for (const rulesetDomain of rulesetDomains) {
+        if (!rulesetDomain) {
+          continue;
+        }
+        if (domain === rulesetDomain || domain.endsWith('.' + rulesetDomain)) {
+          return true;
+        }
+      }
     }
   }
 
@@ -400,6 +409,7 @@ export default {
 
       const url = new URL(request.url);
       const pathname = url.pathname;
+      const pathWithQuery = pathname + url.search;
       const method = request.method;
 
       // Check Basic Auth
@@ -470,7 +480,7 @@ export default {
       }
 
       // Try to call the WASM handler
-      const wasmResult = callWasmHandler(method, pathname, request.headers) || {};
+      const wasmResult = callWasmHandler(method, pathWithQuery, request.headers) || {};
 
       // Check if this is a proxy request that needs fetching
       if (wasmResult.needsFetch && wasmResult.proxyURL) {
