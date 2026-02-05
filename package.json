@@ -7,8 +7,8 @@
 		"build:rules": "node scripts/build-rules.js",
 		"build:wasm": "bash scripts/build-wasm.sh",
 		"build": "npm run build:rules && npm run build:wasm",
-		"deploy": "wrangler deploy",
-		"deploy:local": "wrangler deploy --config wrangler.local.toml",
+		"deploy": "npm run build && wrangler deploy",
+		"deploy:local": "npm run build && wrangler deploy --config wrangler.local.toml",
 		"dev": "wrangler dev",
 		"dev:local": "wrangler dev --local --config wrangler.local.toml"
 	},
