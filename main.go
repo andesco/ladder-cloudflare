@@ -17,11 +17,19 @@ import (
 //go:embed ruleset.yaml
 var embeddedRuleset string
 
+//go:embed ruleset-manual.yaml
+var embeddedManualRuleset string
+
+//go:embed ruleset-bpc.yaml
+var embeddedBPCRuleset string
+
 var (
-	UserAgent    = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
-	ForwardedFor = "66.249.66.1"
-	parsedRules  RuleSet
-	random       = rand.New(rand.NewSource(time.Now().UnixNano()))
+	UserAgent         = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+	ForwardedFor      = "66.249.66.1"
+	parsedRules       RuleSet // merged (default)
+	parsedManualRules RuleSet // manual-only (for /yaml/ routes)
+	parsedBPCRules    RuleSet // BPC-only (for /json/ routes)
+	random            = rand.New(rand.NewSource(time.Now().UnixNano()))
 )
 
 // Full-featured rule structures with yaml.v3 support (matching ladder/pkg/ruleset)
@@ -138,10 +146,22 @@ func handleRequest(this js.Value, args []js.Value) interface{} {
 	path := args[1].String()
 	requestHeaders := jsHeadersToMap(args[2]) // Request headers from JavaScript
 
+	// Detect ruleset mode from path prefix
+	rulesetMode := "merged" // default
+	cleanPath := path
+
+	if strings.HasPrefix(path, "/yaml/") {
+		rulesetMode = "yaml"
+		cleanPath = "/" + strings.TrimPrefix(path, "/yaml/")
+	} else if strings.HasPrefix(path, "/json/") {
+		rulesetMode = "json"
+		cleanPath = "/" + strings.TrimPrefix(path, "/json/")
+	}
+
 	// Handle special endpoints
 	switch {
-	case strings.HasPrefix(path, "/api/"):
-		targetPath := strings.TrimPrefix(path, "/api/")
+	case strings.HasPrefix(cleanPath, "/api/"):
+		targetPath := strings.TrimPrefix(cleanPath, "/api/")
 		targetURL, err := extractURL(targetPath, requestHeaders)
 		if err != nil {
 			return createErrorResponse(400, fmt.Sprintf("Invalid URL: %s", err.Error()))
@@ -156,14 +176,15 @@ func handleRequest(this js.Value, args []js.Value) interface{} {
 		result.Set("proxyURL", targetURL)
 		result.Set("needsFetch", true)
 		result.Set("responseType", "api")
+		result.Set("rulesetMode", rulesetMode)
 
 		headers := js.Global().Get("Object").New()
 		headers.Set("Content-Type", "application/json")
 		result.Set("headers", headers)
 
 		return result
-	case strings.HasPrefix(path, "/raw/"):
-		targetPath := strings.TrimPrefix(path, "/raw/")
+	case strings.HasPrefix(cleanPath, "/raw/"):
+		targetPath := strings.TrimPrefix(cleanPath, "/raw/")
 		targetURL, err := extractURL(targetPath, requestHeaders)
 		if err != nil {
 			return createErrorResponse(400, fmt.Sprintf("Invalid URL: %s", err.Error()))
@@ -178,23 +199,24 @@ func handleRequest(this js.Value, args []js.Value) interface{} {
 		result.Set("proxyURL", targetURL)
 		result.Set("needsFetch", true)
 		result.Set("responseType", "raw")
+		result.Set("rulesetMode", rulesetMode)
 
 		headers := js.Global().Get("Object").New()
 		headers.Set("Content-Type", "text/plain")
 		result.Set("headers", headers)
 
 		return result
-	case path == "/test":
+	case cleanPath == "/test":
 		if testURL := getRandomTestURL(); testURL != "" {
 			return createRedirectResponse("/" + testURL)
 		}
 		return createErrorResponse(404, "No test URLs available")
-	case path == "/ruleset":
+	case cleanPath == "/ruleset":
 		return createRulesetResponse()
 	}
 
 	// Extract target URL from path
-	targetURL, err := extractURL(path, requestHeaders)
+	targetURL, err := extractURL(cleanPath, requestHeaders)
 	if err != nil {
 		return createErrorResponse(400, fmt.Sprintf("Invalid URL: %s", err.Error()))
 	}
@@ -210,6 +232,7 @@ func handleRequest(this js.Value, args []js.Value) interface{} {
 	result.Set("status", 200)
 	result.Set("proxyURL", targetURL)
 	result.Set("needsFetch", true)
+	result.Set("rulesetMode", rulesetMode)
 
 	headers := js.Global().Get("Object").New()
 	headers.Set("Content-Type", "text/html")
@@ -297,14 +320,20 @@ func fetchURL(this js.Value, args []js.Value) interface{} {
 
 	targetURL := args[0].String()
 
+	// Optional second argument: ruleset mode
+	rulesetMode := "merged"
+	if len(args) >= 2 && !args[1].IsUndefined() {
+		rulesetMode = args[1].String()
+	}
+
 	// Parse the URL to get domain for rule matching
 	parsedURL, err := url.Parse(targetURL)
 	if err != nil {
 		return createErrorResponse(400, fmt.Sprintf("Invalid URL: %s", err.Error()))
 	}
 
-	// Find matching rule for this domain
-	rule := findRuleForDomainAndPath(parsedURL.Host, parsedURL.Path)
+	// Find matching rule for this domain using the specified ruleset
+	rule := findRuleForDomainAndPathWithMode(parsedURL.Host, parsedURL.Path, rulesetMode)
 
 	// Apply URL modifications if present
 	finalURL := applyURLModifications(targetURL, rule)
@@ -560,14 +589,20 @@ func processContent(this js.Value, args []js.Value) interface{} {
 	content := args[0].String()
 	targetURL := args[1].String()
 
+	// Optional third argument: ruleset mode
+	rulesetMode := "merged"
+	if len(args) >= 3 && !args[2].IsUndefined() {
+		rulesetMode = args[2].String()
+	}
+
 	// Parse URL to get domain and path
 	parsedURL, err := url.Parse(targetURL)
 	if err != nil {
 		return createErrorResponse(400, fmt.Sprintf("Invalid URL: %s", err.Error()))
 	}
 
-	// Find matching rule with path support
-	rule := findRuleForDomainAndPath(parsedURL.Host, parsedURL.Path)
+	// Find matching rule with path support using the specified ruleset
+	rule := findRuleForDomainAndPathWithMode(parsedURL.Host, parsedURL.Path, rulesetMode)
 
 	// Step 1: Apply regex rules (string ops, before parse)
 	for _, regexRule := range rule.RegexRules {
@@ -980,14 +1015,43 @@ func applyAmpUnhide(doc *goquery.Document) {
 	})
 }
 
-// parseRuleset parses the embedded YAML ruleset using yaml.v3
+// parseRuleset parses the embedded YAML rulesets using yaml.v3
 func parseRuleset() {
+	// Parse merged ruleset
 	err := yaml.Unmarshal([]byte(embeddedRuleset), &parsedRules)
 	if err != nil {
-		fmt.Printf("Error parsing YAML ruleset: %v\n", err)
+		fmt.Printf("Error parsing merged YAML ruleset: %v\n", err)
 		return
 	}
-	fmt.Printf("Successfully parsed %d rules from embedded YAML\n", len(parsedRules))
+	fmt.Printf("Successfully parsed %d merged rules from embedded YAML\n", len(parsedRules))
+
+	// Parse manual-only ruleset
+	err = yaml.Unmarshal([]byte(embeddedManualRuleset), &parsedManualRules)
+	if err != nil {
+		fmt.Printf("Error parsing manual YAML ruleset: %v\n", err)
+		return
+	}
+	fmt.Printf("Successfully parsed %d manual rules from embedded YAML\n", len(parsedManualRules))
+
+	// Parse BPC-only ruleset
+	err = yaml.Unmarshal([]byte(embeddedBPCRuleset), &parsedBPCRules)
+	if err != nil {
+		fmt.Printf("Error parsing BPC YAML ruleset: %v\n", err)
+		return
+	}
+	fmt.Printf("Successfully parsed %d BPC rules from embedded YAML\n", len(parsedBPCRules))
+}
+
+// selectRuleset returns the appropriate ruleset based on mode
+func selectRuleset(mode string) RuleSet {
+	switch mode {
+	case "yaml":
+		return parsedManualRules
+	case "json":
+		return parsedBPCRules
+	default:
+		return parsedRules
+	}
 }
 
 // findRuleForDomain finds the matching rule for a given domain and path
@@ -997,7 +1061,18 @@ func findRuleForDomain(domain string) Rule {
 
 // findRuleForDomainAndPath finds the matching rule for a given domain and path
 func findRuleForDomainAndPath(domain, path string) Rule {
-	for _, rule := range parsedRules {
+	return findRuleForDomainAndPathInRuleset(domain, path, parsedRules)
+}
+
+// findRuleForDomainAndPathWithMode finds the matching rule using the specified ruleset mode
+func findRuleForDomainAndPathWithMode(domain, path, mode string) Rule {
+	rules := selectRuleset(mode)
+	return findRuleForDomainAndPathInRuleset(domain, path, rules)
+}
+
+// findRuleForDomainAndPathInRuleset finds the matching rule in a specific ruleset
+func findRuleForDomainAndPathInRuleset(domain, path string, rules RuleSet) Rule {
+	for _, rule := range rules {
 		// Check single domain
 		if rule.Domain != "" && (rule.Domain == domain || strings.HasSuffix(domain, "."+rule.Domain)) {
 			// Check path restrictions if present

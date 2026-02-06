@@ -7,6 +7,7 @@ const yaml = require('yaml');
 const BPC_URL = 'https://bypass.andrewe.dev/sites_aggregated.json';
 const MANUAL_FILE = 'ruleset-manual.yaml';
 const OUTPUT_FILE = 'ruleset.yaml';
+const BPC_OUTPUT_FILE = 'ruleset-bpc.yaml';
 const TEST_URLS_FILE = 'test-urls.json';
 
 // Known user-agent strings
@@ -478,6 +479,26 @@ async function main() {
 
     fs.writeFileSync(OUTPUT_FILE, yamlOutput);
     console.log(`Generated ${OUTPUT_FILE} with ${cleanedRules.length} rules covering ${domainCount} domains`);
+
+    // Generate BPC-only ruleset (without manual merge)
+    const bpcOnlyGrouped = regroupRules(bpcRules);
+    const bpcOnlyCleaned = bpcOnlyGrouped.map(cleanRule);
+
+    // Count domains in BPC-only ruleset
+    let bpcDomainCount = 0;
+    for (const rule of bpcOnlyCleaned) {
+      if (rule.domain) bpcDomainCount++;
+      if (rule.domains) bpcDomainCount += rule.domains.length;
+    }
+
+    const bpcYamlOutput = yaml.stringify(bpcOnlyCleaned, {
+      lineWidth: 0,
+      defaultStringType: 'PLAIN',
+      defaultKeyType: 'PLAIN',
+    });
+
+    fs.writeFileSync(BPC_OUTPUT_FILE, bpcYamlOutput);
+    console.log(`Generated ${BPC_OUTPUT_FILE} with ${bpcOnlyCleaned.length} rules covering ${bpcDomainCount} domains`);
 
     // Extract test URLs
     const testUrls = [];

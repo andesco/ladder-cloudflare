@@ -157,10 +157,10 @@ function callWasmHandler(method, path, headers) {
 /**
  * Fetch and process proxied content
  */
-async function fetchProxiedContent(targetURL) {
+async function fetchProxiedContent(targetURL, rulesetMode) {
   try {
     // Get fetch instructions from WASM
-    const fetchInstructions = globalThis.fetchURL ? globalThis.fetchURL(targetURL) : null;
+    const fetchInstructions = globalThis.fetchURL ? globalThis.fetchURL(targetURL, rulesetMode || 'merged') : null;
 
     if (!fetchInstructions) {
       throw new Error('WASM fetchURL function not available');
@@ -219,7 +219,7 @@ async function fetchProxiedContent(targetURL) {
     const originHeaders = copyResponseHeaders(response);
 
     // Process content through WASM (applies rules, injections, regex)
-    const processedResult = globalThis.processContent ? globalThis.processContent(content, targetURL) : null;
+    const processedResult = globalThis.processContent ? globalThis.processContent(content, targetURL, rulesetMode || 'merged') : null;
 
     if (processedResult) {
       content = processedResult.content || content;
@@ -577,9 +577,10 @@ export default {
         }
 
         const responseType = wasmResult.responseType || 'proxy';
+        const rulesetMode = wasmResult.rulesetMode || 'merged';
         const proxyResult = responseType === 'raw'
           ? await fetchRawContent(wasmResult.proxyURL, request.headers)
-          : await fetchProxiedContent(wasmResult.proxyURL);
+          : await fetchProxiedContent(wasmResult.proxyURL, rulesetMode);
 
         // Convert proxy result to Response
         const responseHeaders = new Headers();
