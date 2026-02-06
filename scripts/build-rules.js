@@ -1,73 +1,502 @@
 #!/usr/bin/env node
 
 const fs = require('fs');
-const https = require('https');
 const path = require('path');
+const yaml = require('yaml');
 
-const RULESET_URL = 'https://raw.githubusercontent.com/everywall/ladder-rules/main/ruleset.yaml';
+const BPC_URL = 'https://bypass.andrewe.dev/sites_aggregated.json';
+const MANUAL_FILE = 'ruleset-manual.yaml';
 const OUTPUT_FILE = 'ruleset.yaml';
+const TEST_URLS_FILE = 'test-urls.json';
 
-async function downloadRuleset() {
-    console.log('Downloading ruleset from:', RULESET_URL);
+// Known user-agent strings
+const UA_GOOGLEBOT = 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
+const UA_BINGBOT = 'Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)';
+const UA_FACEBOOKBOT = 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)';
 
-    return new Promise((resolve, reject) => {
-        https.get(RULESET_URL, (response) => {
-            if (response.statusCode !== 200) {
-                reject(new Error(`Failed to download ruleset: ${response.statusCode}`));
-                return;
-            }
+// Known referer URLs
+const REFERER_GOOGLE = 'https://www.google.com/';
+const REFERER_FACEBOOK = 'https://www.facebook.com/';
+const REFERER_TWITTER = 'https://t.co/x?amp=1';
 
-            let data = '';
-            response.on('data', (chunk) => {
-                data += chunk;
-            });
+async function fetchBPC() {
+  console.log('Fetching BPC data from:', BPC_URL);
+  const resp = await fetch(BPC_URL);
+  if (!resp.ok) throw new Error(`Failed to fetch BPC: ${resp.status}`);
+  return resp.json();
+}
 
-            response.on('end', () => {
-                resolve(data);
-            });
-        }).on('error', (error) => {
-            reject(error);
-        });
-    });
+function loadManualRules() {
+  const manualPath = path.resolve(MANUAL_FILE);
+  if (!fs.existsSync(manualPath)) {
+    console.log('No manual ruleset found at', manualPath);
+    return [];
+  }
+  const data = fs.readFileSync(manualPath, 'utf-8');
+  return yaml.parse(data) || [];
+}
+
+// Build a domain → manual rule index
+function indexManualRules(manualRules) {
+  const index = {};
+  for (const rule of manualRules) {
+    const domains = [];
+    if (rule.domain) domains.push(rule.domain);
+    if (rule.domains) domains.push(...rule.domains);
+    for (const d of domains) {
+      index[d] = rule;
+    }
+  }
+  return index;
+}
+
+// Map a single BPC entry to a Ladderflare rule object
+function mapBPCEntry(entry) {
+  const domain = entry.domain;
+  if (!domain || domain.startsWith('###') || domain.startsWith('#')) return null;
+
+  const rule = { domain };
+  const headers = {};
+  let hasHeaders = false;
+
+  // #3: User-agent mapping
+  if (entry.useragent) {
+    switch (entry.useragent) {
+      case 'googlebot':
+        headers['user-agent'] = UA_GOOGLEBOT;
+        headers['referer'] = REFERER_GOOGLE;
+        headers['x-forwarded-for'] = '66.249.66.1';
+        break;
+      case 'bingbot':
+        headers['user-agent'] = UA_BINGBOT;
+        break;
+      case 'facebookbot':
+        headers['user-agent'] = UA_FACEBOOKBOT;
+        break;
+    }
+    hasHeaders = true;
+  }
+
+  if (entry.useragent_custom) {
+    headers['user-agent'] = entry.useragent_custom;
+    hasHeaders = true;
+  }
+
+  // #4: Referer mapping
+  if (entry.referer) {
+    switch (entry.referer) {
+      case 'google':
+        headers['referer'] = REFERER_GOOGLE;
+        break;
+      case 'facebook':
+        headers['referer'] = REFERER_FACEBOOK;
+        break;
+      case 'twitter':
+        headers['referer'] = REFERER_TWITTER;
+        break;
+      default:
+        headers['referer'] = entry.referer;
+    }
+    hasHeaders = true;
+  }
+
+  if (entry.referer_custom) {
+    headers['referer'] = entry.referer_custom;
+    hasHeaders = true;
+  }
+
+  // #6: Custom headers → cookie + extraHeaders
+  if (entry.headers_custom) {
+    const extraHeaders = {};
+    for (const [key, val] of Object.entries(entry.headers_custom)) {
+      if (key.toLowerCase() === 'cookie') {
+        headers['cookie'] = val;
+        hasHeaders = true;
+      } else {
+        extraHeaders[key] = String(val);
+      }
+    }
+    if (Object.keys(extraHeaders).length > 0) {
+      rule.extraHeaders = extraHeaders;
+    }
+  }
+
+  if (hasHeaders) {
+    rule.headers = headers;
+  }
+
+  // #5: Random IP
+  if (entry.random_ip) {
+    rule.randomIP = entry.random_ip === 'eu' ? 'eu' : 'true';
+  }
+
+  // #7: Block regex (script blocking)
+  if (entry.block_regex) {
+    const patterns = typeof entry.block_regex === 'string' ? [entry.block_regex] : entry.block_regex;
+    rule.blockScripts = patterns.map(p => p.replace(/\{domain\}/g, domain.replace(/\./g, '\\.')));
+  }
+
+  // #8: Block regex general
+  if (entry.block_regex_general) {
+    const patterns = typeof entry.block_regex_general === 'string' ? [entry.block_regex_general] : entry.block_regex_general;
+    rule.blockScriptsGeneral = patterns.map(p => p.replace(/\{domain\}/g, domain.replace(/\./g, '\\.')));
+  }
+
+  // #9: cs_code (content script operations)
+  if (entry.cs_code) {
+    let ops;
+    if (typeof entry.cs_code === 'string') {
+      try {
+        ops = JSON.parse(entry.cs_code);
+      } catch (e) {
+        console.warn(`Failed to parse cs_code for ${domain}:`, e.message);
+        ops = null;
+      }
+    } else if (Array.isArray(entry.cs_code)) {
+      ops = entry.cs_code;
+    }
+    if (ops && Array.isArray(ops)) {
+      rule.csCode = ops.map(op => {
+        const mapped = {};
+        if (op.cond) mapped.cond = op.cond;
+        if (op.hide_elem) mapped.hide_elem = op.hide_elem;
+        if (op.rm_elem) mapped.rm_elem = true;
+        if (op.rm_class) mapped.rm_class = op.rm_class;
+        if (op.rm_attrib) mapped.rm_attrib = op.rm_attrib;
+        if (op.set_attrib) mapped.set_attrib = op.set_attrib;
+        if (op.add_style) mapped.add_style = op.add_style;
+        return mapped;
+      });
+    }
+  }
+
+  // #10: AMP unhide
+  if (entry.amp_unhide) {
+    rule.ampUnhide = true;
+  }
+
+  // #11: AMP redirect → urlMods query
+  if (entry.amp_redirect) {
+    rule.urlMods = { query: [{ key: 'amp', value: '1' }] };
+  }
+
+  // #12: Block inline JS
+  if (entry.block_js_inline) {
+    rule.blockJsInline = entry.block_js_inline;
+  }
+
+  // #13: Clear local/session storage
+  if (entry.cs_clear_lclstrg) {
+    rule.clearStorage = true;
+  }
+
+  return rule;
+}
+
+// Handle exception arrays: produce separate rules for excepted domains
+function handleExceptions(entry, baseRule) {
+  const exceptionRules = [];
+  if (!entry.exception || !Array.isArray(entry.exception)) return exceptionRules;
+
+  for (const exc of entry.exception) {
+    // Exception domain can be string or array
+    const excDomains = Array.isArray(exc.domain) ? exc.domain : [exc.domain];
+
+    for (const excDomain of excDomains) {
+      if (!excDomain) continue;
+
+      // Map the exception entry as its own BPC entry
+      const excEntry = { ...exc, domain: excDomain };
+      const excRule = mapBPCEntry(excEntry);
+      if (excRule) {
+        exceptionRules.push(excRule);
+      }
+    }
+  }
+
+  return exceptionRules;
+}
+
+// Generate a stable key for grouping rules with identical properties
+function ruleGroupKey(rule) {
+  const copy = { ...rule };
+  delete copy.domain;
+  delete copy.domains;
+  // Sort keys for stable comparison
+  return JSON.stringify(copy, Object.keys(copy).sort());
+}
+
+// Re-group: domains with identical non-domain properties → single rule with domains: [...]
+// Rules with injections, tests, or regexRules are NOT grouped (they're unique per domain)
+function regroupRules(rules) {
+  const groups = new Map();
+  const ungroupable = [];
+
+  for (const rule of rules) {
+    // Don't group rules that have domain-specific content
+    const hasUniqueContent = (rule.injections && rule.injections.length > 0) ||
+                              (rule.tests && (Array.isArray(rule.tests) ? rule.tests.length > 0 : !!rule.tests)) ||
+                              (rule.regexRules && rule.regexRules.length > 0) ||
+                              (rule.paths && rule.paths.length > 0);
+
+    if (hasUniqueContent) {
+      ungroupable.push(rule);
+      continue;
+    }
+
+    const key = ruleGroupKey(rule);
+    // Collect all domains from both domain and domains fields
+    const ruleDomains = [];
+    if (rule.domain) ruleDomains.push(rule.domain);
+    if (rule.domains) ruleDomains.push(...rule.domains);
+
+    if (!groups.has(key)) {
+      groups.set(key, { ...rule, _domains: [...ruleDomains] });
+    } else {
+      groups.get(key)._domains.push(...ruleDomains);
+    }
+  }
+
+  const result = [];
+
+  // Add grouped rules
+  for (const group of groups.values()) {
+    const domains = group._domains.filter(Boolean);
+    delete group._domains;
+    delete group.domain;
+    delete group.domains;
+
+    if (domains.length === 1) {
+      group.domain = domains[0];
+    } else {
+      group.domains = domains.sort();
+    }
+    result.push(group);
+  }
+
+  // Add ungroupable rules as-is
+  for (const rule of ungroupable) {
+    result.push(rule);
+  }
+
+  return result;
+}
+
+// Merge BPC rule with manual rule: BPC provides headers/blocking, manual provides injections/tests/regexRules
+function mergeRules(bpcRule, manualRule) {
+  const merged = { ...bpcRule };
+
+  // Keep manual injections
+  if (manualRule.injections) {
+    merged.injections = manualRule.injections;
+  }
+
+  // Keep manual tests
+  if (manualRule.tests) {
+    merged.tests = manualRule.tests;
+  }
+
+  // Keep manual regexRules
+  if (manualRule.regexRules) {
+    merged.regexRules = manualRule.regexRules;
+  }
+
+  // Keep manual paths
+  if (manualRule.paths) {
+    merged.paths = manualRule.paths;
+  }
+
+  // Keep manual urlMods (unless BPC also has them, then merge)
+  if (manualRule.urlMods) {
+    if (merged.urlMods) {
+      // Merge: BPC query + manual query etc
+      merged.urlMods = {
+        domain: [...(merged.urlMods.domain || []), ...(manualRule.urlMods.domain || [])],
+        path: [...(merged.urlMods.path || []), ...(manualRule.urlMods.path || [])],
+        query: [...(merged.urlMods.query || []), ...(manualRule.urlMods.query || [])],
+      };
+      // Clean up empty arrays
+      if (merged.urlMods.domain.length === 0) delete merged.urlMods.domain;
+      if (merged.urlMods.path.length === 0) delete merged.urlMods.path;
+      if (merged.urlMods.query.length === 0) delete merged.urlMods.query;
+    } else {
+      merged.urlMods = manualRule.urlMods;
+    }
+  }
+
+  // Merge headers: BPC headers take precedence, manual headers fill gaps
+  if (manualRule.headers) {
+    merged.headers = merged.headers || {};
+    for (const [key, val] of Object.entries(manualRule.headers)) {
+      if (!merged.headers[key]) {
+        merged.headers[key] = val;
+      }
+    }
+  }
+
+  // Keep manual googleCache
+  if (manualRule.googleCache) {
+    merged.googleCache = manualRule.googleCache;
+  }
+
+  return merged;
+}
+
+// Clean up a rule for YAML output (remove empty/falsy fields)
+function cleanRule(rule) {
+  const cleaned = {};
+
+  // Domain fields first
+  if (rule.domain) cleaned.domain = rule.domain;
+  if (rule.domains && rule.domains.length > 0) cleaned.domains = rule.domains;
+  if (rule.paths && rule.paths.length > 0) cleaned.paths = rule.paths;
+
+  // Headers
+  if (rule.headers && Object.keys(rule.headers).length > 0) cleaned.headers = rule.headers;
+
+  // URL mods
+  if (rule.urlMods) cleaned.urlMods = rule.urlMods;
+
+  // Google Cache
+  if (rule.googleCache) cleaned.googleCache = rule.googleCache;
+
+  // Extra headers
+  if (rule.extraHeaders && Object.keys(rule.extraHeaders).length > 0) cleaned.extraHeaders = rule.extraHeaders;
+
+  // New BPC fields
+  if (rule.randomIP) cleaned.randomIP = rule.randomIP;
+  if (rule.blockScripts && rule.blockScripts.length > 0) cleaned.blockScripts = rule.blockScripts;
+  if (rule.blockScriptsGeneral && rule.blockScriptsGeneral.length > 0) cleaned.blockScriptsGeneral = rule.blockScriptsGeneral;
+  if (rule.csCode && rule.csCode.length > 0) cleaned.csCode = rule.csCode;
+  if (rule.ampUnhide) cleaned.ampUnhide = rule.ampUnhide;
+  if (rule.blockJsInline) cleaned.blockJsInline = rule.blockJsInline;
+  if (rule.clearStorage) cleaned.clearStorage = rule.clearStorage;
+  if (rule.pathExclusions && rule.pathExclusions.length > 0) cleaned.pathExclusions = rule.pathExclusions;
+
+  // Regex rules
+  if (rule.regexRules && rule.regexRules.length > 0) cleaned.regexRules = rule.regexRules;
+
+  // Injections
+  if (rule.injections && rule.injections.length > 0) cleaned.injections = rule.injections;
+
+  // Tests
+  if (rule.tests) {
+    if (Array.isArray(rule.tests) && rule.tests.length > 0) {
+      cleaned.tests = rule.tests;
+    } else if (!Array.isArray(rule.tests) && rule.tests.url) {
+      cleaned.tests = [rule.tests];
+    }
+  }
+
+  return cleaned;
 }
 
 async function main() {
-    try {
-        const rulesetData = await downloadRuleset();
-        const normalizedRulesetData = rulesetData.replace(/ueser-agent:/g, 'user-agent:');
+  try {
+    // Step 1: Fetch BPC data
+    const bpcData = await fetchBPC();
+    console.log(`Fetched ${bpcData.length} BPC entries`);
 
-        // Write the ruleset to the output file
-        fs.writeFileSync(OUTPUT_FILE, normalizedRulesetData);
-        console.log(`Ruleset downloaded and saved to: ${OUTPUT_FILE}`);
+    // Step 2: Load manual rules
+    const manualRules = loadManualRules();
+    const manualIndex = indexManualRules(manualRules);
+    console.log(`Loaded ${manualRules.length} manual rules covering ${Object.keys(manualIndex).length} domains`);
 
-        // Parse the YAML to extract test URLs for validation
-        const yaml = require('yaml');
-        const ruleset = yaml.parse(normalizedRulesetData);
+    // Step 3-4: Map BPC entries to Ladderflare rules
+    const bpcRules = [];
+    const seenDomains = new Set();
 
-        const testUrls = [];
-        if (Array.isArray(ruleset)) {
-            ruleset.forEach(rule => {
-                if (rule.tests && Array.isArray(rule.tests)) {
-                    rule.tests.forEach(test => {
-                        if (test.url) {
-                            testUrls.push(test.url);
-                        }
-                    });
-                }
-            });
-        }
+    for (const entry of bpcData) {
+      const rule = mapBPCEntry(entry);
+      if (!rule) continue;
 
-        console.log(`Found ${testUrls.length} test URLs in ruleset`);
+      bpcRules.push(rule);
+      seenDomains.add(rule.domain);
 
-        // Write test URLs to a separate file for reference
-        const testUrlsJson = JSON.stringify(testUrls, null, 2);
-        fs.writeFileSync('test-urls.json', testUrlsJson);
-        console.log('Test URLs saved to: test-urls.json');
-
-    } catch (error) {
-        console.error('Error building ruleset:', error);
-        process.exit(1);
+      // Handle exceptions (#18)
+      const excRules = handleExceptions(entry, rule);
+      for (const excRule of excRules) {
+        bpcRules.push(excRule);
+        seenDomains.add(excRule.domain);
+      }
     }
+
+    console.log(`Mapped ${bpcRules.length} BPC rules for ${seenDomains.size} domains`);
+
+    // Step 5: Merge with manual rules
+    const mergedRules = [];
+    const manualDomainsUsed = new Set();
+
+    for (const bpcRule of bpcRules) {
+      const domain = bpcRule.domain;
+      const manualRule = manualIndex[domain];
+
+      if (manualRule) {
+        mergedRules.push(mergeRules(bpcRule, manualRule));
+        manualDomainsUsed.add(domain);
+        // Mark all domains in the manual rule as used
+        if (manualRule.domains) {
+          for (const d of manualRule.domains) manualDomainsUsed.add(d);
+        }
+        if (manualRule.domain) manualDomainsUsed.add(manualRule.domain);
+      } else {
+        mergedRules.push(bpcRule);
+      }
+    }
+
+    // Add manual-only rules (not covered by BPC)
+    for (const manualRule of manualRules) {
+      const manualDomains = [];
+      if (manualRule.domain) manualDomains.push(manualRule.domain);
+      if (manualRule.domains) manualDomains.push(...manualRule.domains);
+
+      const allUsed = manualDomains.every(d => manualDomainsUsed.has(d));
+      if (!allUsed) {
+        mergedRules.push(manualRule);
+      }
+    }
+
+    // Step 6: Re-group identical rules (#17)
+    const groupedRules = regroupRules(mergedRules);
+
+    // Step 7: Clean and output
+    const cleanedRules = groupedRules.map(cleanRule);
+
+    // Count domains
+    let domainCount = 0;
+    for (const rule of cleanedRules) {
+      if (rule.domain) domainCount++;
+      if (rule.domains) domainCount += rule.domains.length;
+    }
+
+    // Generate YAML
+    const yamlOutput = yaml.stringify(cleanedRules, {
+      lineWidth: 0, // Don't wrap lines
+      defaultStringType: 'PLAIN',
+      defaultKeyType: 'PLAIN',
+    });
+
+    fs.writeFileSync(OUTPUT_FILE, yamlOutput);
+    console.log(`Generated ${OUTPUT_FILE} with ${cleanedRules.length} rules covering ${domainCount} domains`);
+
+    // Extract test URLs
+    const testUrls = [];
+    for (const rule of cleanedRules) {
+      if (rule.tests && Array.isArray(rule.tests)) {
+        for (const test of rule.tests) {
+          if (test.url) testUrls.push(test.url);
+        }
+      }
+    }
+
+    const uniqueTestUrls = [...new Set(testUrls)];
+    fs.writeFileSync(TEST_URLS_FILE, JSON.stringify(uniqueTestUrls, null, 2));
+    console.log(`Saved ${uniqueTestUrls.length} test URLs to ${TEST_URLS_FILE}`);
+
+  } catch (error) {
+    console.error('Error building ruleset:', error);
+    process.exit(1);
+  }
 }
 
 main();

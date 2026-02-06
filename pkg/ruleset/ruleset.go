@@ -23,6 +23,16 @@ type KV struct {
 	Value string `yaml:"value"`
 }
 
+type CsCodeOp struct {
+	Cond      string `yaml:"cond,omitempty"`
+	HideElem  string `yaml:"hide_elem,omitempty"`
+	RmElem    bool   `yaml:"rm_elem,omitempty"`
+	RmClass   string `yaml:"rm_class,omitempty"`
+	RmAttrib  string `yaml:"rm_attrib,omitempty"`
+	SetAttrib string `yaml:"set_attrib,omitempty"`
+	AddStyle  string `yaml:"add_style,omitempty"`
+}
+
 type Ruleset []Rule
 
 type Rule struct {
@@ -56,6 +66,18 @@ type Rule struct {
 		URL  string `yaml:"url,omitempty"`
 		Test string `yaml:"test,omitempty"`
 	} `yaml:"tests,omitempty"`
+
+	// BPC integration fields
+	RandomIP            string            `yaml:"randomIP,omitempty"`
+	BlockScripts        []string          `yaml:"blockScripts,omitempty"`
+	BlockScriptsGeneral []string          `yaml:"blockScriptsGeneral,omitempty"`
+	ExcludedDomains     []string          `yaml:"excludedDomains,omitempty"`
+	CsCode              []CsCodeOp        `yaml:"csCode,omitempty"`
+	AmpUnhide           bool              `yaml:"ampUnhide,omitempty"`
+	BlockJsInline       string            `yaml:"blockJsInline,omitempty"`
+	ClearStorage        bool              `yaml:"clearStorage,omitempty"`
+	PathExclusions      []string          `yaml:"pathExclusions,omitempty"`
+	ExtraHeaders        map[string]string `yaml:"extraHeaders,omitempty"`
 }
 
 var remoteRegex = regexp.MustCompile(`^https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()!@:%_\+.~#?&\/\/=]*)`)
@@ -237,6 +259,23 @@ func (rs *Ruleset) FindRuleForURL(rawURL string) *Rule {
 						}
 					}
 					if !matchesPath {
+						continue
+					}
+				}
+				// Check path exclusions
+				if len(rule.PathExclusions) > 0 {
+					excluded := false
+					for _, pattern := range rule.PathExclusions {
+						re, err := regexp.Compile(pattern)
+						if err != nil {
+							continue
+						}
+						if re.MatchString(path) {
+							excluded = true
+							break
+						}
+					}
+					if excluded {
 						continue
 					}
 				}
