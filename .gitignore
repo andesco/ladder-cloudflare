@@ -31,3 +31,9 @@ wrangler.local.toml
 .claude/
 CLAUDE.md
 GEMINI.md
+
+# Alias files
+.aliases
+.bash_aliases
+.zsh_aliases
+aliases

@@ -188,6 +188,17 @@ async function fetchProxiedContent(targetURL) {
       requestHeaders['Cookie'] = fetchInstructions.cookie;
     }
 
+    // #6: Apply extra headers from rule
+    if (fetchInstructions.extraHeaders && typeof fetchInstructions.extraHeaders === 'object') {
+      const keys = Object.keys(fetchInstructions.extraHeaders);
+      for (const key of keys) {
+        const val = fetchInstructions.extraHeaders[key];
+        if (val !== undefined && val !== null) {
+          requestHeaders[key] = String(val);
+        }
+      }
+    }
+
     const fetchURL = fetchInstructions.url || targetURL;
 
     // Fetch the target URL

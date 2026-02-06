@@ -35,6 +35,16 @@ type KV struct {
 	Value string `yaml:"value"`
 }
 
+type CsCodeOp struct {
+	Cond     string `yaml:"cond,omitempty"`
+	HideElem string `yaml:"hide_elem,omitempty"`
+	RmElem   bool   `yaml:"rm_elem,omitempty"`
+	RmClass  string `yaml:"rm_class,omitempty"`
+	RmAttrib string `yaml:"rm_attrib,omitempty"`
+	SetAttrib string `yaml:"set_attrib,omitempty"` // "attr|value" format
+	AddStyle string `yaml:"add_style,omitempty"`
+}
+
 type RuleSet []Rule
 
 type Rule struct {
@@ -68,6 +78,18 @@ type Rule struct {
 		URL  string `yaml:"url,omitempty"`
 		Test string `yaml:"test,omitempty"`
 	} `yaml:"tests,omitempty"`
+
+	// BPC integration fields
+	RandomIP            string            `yaml:"randomIP,omitempty"`
+	BlockScripts        []string          `yaml:"blockScripts,omitempty"`
+	BlockScriptsGeneral []string          `yaml:"blockScriptsGeneral,omitempty"`
+	ExcludedDomains     []string          `yaml:"excludedDomains,omitempty"`
+	CsCode              []CsCodeOp        `yaml:"csCode,omitempty"`
+	AmpUnhide           bool              `yaml:"ampUnhide,omitempty"`
+	BlockJsInline       string            `yaml:"blockJsInline,omitempty"`
+	ClearStorage        bool              `yaml:"clearStorage,omitempty"`
+	PathExclusions      []string          `yaml:"pathExclusions,omitempty"`
+	ExtraHeaders        map[string]string `yaml:"extraHeaders,omitempty"`
 }
 
 func main() {
@@ -322,6 +344,26 @@ func fetchURL(this js.Value, args []js.Value) interface{} {
 		result.Set("csp", rule.Headers.CSP)
 	}
 
+	// #5: Random IP generation
+	if rule.RandomIP != "" {
+		var ip string
+		if rule.RandomIP == "eu" {
+			ip = fmt.Sprintf("185.%d.%d.%d", random.Intn(256), random.Intn(256), random.Intn(256))
+		} else {
+			ip = fmt.Sprintf("%d.%d.%d.%d", random.Intn(224)+1, random.Intn(256), random.Intn(256), random.Intn(256))
+		}
+		result.Set("xForwardedFor", ip)
+	}
+
+	// #6: Extra headers
+	if len(rule.ExtraHeaders) > 0 {
+		extraHeaders := js.Global().Get("Object").New()
+		for key, val := range rule.ExtraHeaders {
+			extraHeaders.Set(key, val)
+		}
+		result.Set("extraHeaders", extraHeaders)
+	}
+
 	// Include rule info for content processing
 	result.Set("hasInjections", len(rule.Injections) > 0)
 	result.Set("hasRegexRules", len(rule.RegexRules) > 0)
@@ -509,6 +551,7 @@ func getTestURLs() []string {
 }
 
 // processContent applies content modifications (injections + regex rules) using GoQuery
+// Refactored to single GoQuery parse for all DOM operations
 func processContent(this js.Value, args []js.Value) interface{} {
 	if len(args) < 2 {
 		return createErrorResponse(400, "Content and URL required")
@@ -526,7 +569,7 @@ func processContent(this js.Value, args []js.Value) interface{} {
 	// Find matching rule with path support
 	rule := findRuleForDomainAndPath(parsedURL.Host, parsedURL.Path)
 
-	// Apply regex rules first
+	// Step 1: Apply regex rules (string ops, before parse)
 	for _, regexRule := range rule.RegexRules {
 		re, err := regexp.Compile(regexRule.Match)
 		if err != nil {
@@ -536,15 +579,67 @@ func processContent(this js.Value, args []js.Value) interface{} {
 		content = re.ReplaceAllString(content, regexRule.Replace)
 	}
 
-	// Apply HTML rewriting
-	content = rewriteHTML(content, parsedURL.Host)
+	// Step 2: Parse HTML into GoQuery doc once
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(content))
+	if err != nil {
+		// Fallback to string-based processing if parsing fails
+		content = rewriteHTMLFallback(content, parsedURL.Host)
+		content = applyContentInjectionsStringFallback(content, rule.Injections)
 
-	// Apply content injections using GoQuery
-	content = applyContentInjections(content, rule.Injections)
+		result := js.Global().Get("Object").New()
+		result.Set("content", content)
+		if rule.Headers.CSP != "" {
+			result.Set("csp", rule.Headers.CSP)
+		}
+		return result
+	}
+
+	// Step 3: Block scripts (#7)
+	if len(rule.BlockScripts) > 0 {
+		applyBlockScripts(doc, rule.BlockScripts)
+	}
+
+	// Step 4: Block inline JS (#12)
+	if rule.BlockJsInline != "" {
+		applyBlockJsInline(doc, rule.BlockJsInline, targetURL)
+	}
+
+	// Step 5: Apply csCode operations (#9)
+	if len(rule.CsCode) > 0 {
+		applyCsCode(doc, rule.CsCode)
+	}
+
+	// Step 6: AMP unhide (#10)
+	if rule.AmpUnhide {
+		applyAmpUnhide(doc)
+	}
+
+	// Step 7: Rewrite HTML (existing, refactored to take doc)
+	rewriteHTMLDoc(doc, parsedURL.Host)
+
+	// Step 8: Apply content injections (existing, refactored to take doc)
+	applyInjectionsDoc(doc, rule.Injections)
+
+	// Step 9: Clear storage (#13)
+	if rule.ClearStorage {
+		doc.Find("head").PrependHtml(`<script>localStorage.clear();sessionStorage.clear()</script>`)
+	}
+
+	// Step 10: Serialize once
+	html, err := doc.Html()
+	if err != nil {
+		// Fallback
+		html = content
+	}
+
+	// CSS url() rewrites (GoQuery doesn't parse CSS)
+	proxyPrefix := "/https://" + parsedURL.Host + "/"
+	html = strings.ReplaceAll(html, `url('/`, `url('`+proxyPrefix)
+	html = strings.ReplaceAll(html, `url(/`, `url(`+proxyPrefix)
 
 	// Create result with processed content
 	result := js.Global().Get("Object").New()
-	result.Set("content", content)
+	result.Set("content", html)
 
 	if rule.Headers.CSP != "" {
 		result.Set("csp", rule.Headers.CSP)
@@ -665,6 +760,226 @@ func applyContentInjectionsStringFallback(content string, injections []struct {
 	return content
 }
 
+// rewriteHTMLDoc rewrites HTML content to proxy relative URLs on an existing GoQuery doc
+func rewriteHTMLDoc(doc *goquery.Document, originalHost string) {
+	proxyPrefix := "/https://" + originalHost + "/"
+
+	doc.Find("img[src]").Each(func(i int, s *goquery.Selection) {
+		src, exists := s.Attr("src")
+		if exists && strings.HasPrefix(src, "/") && !strings.HasPrefix(src, "//") {
+			s.SetAttr("src", proxyPrefix+strings.TrimPrefix(src, "/"))
+		}
+	})
+
+	doc.Find("script[src]").Each(func(i int, s *goquery.Selection) {
+		src, exists := s.Attr("src")
+		if exists && strings.HasPrefix(src, "/") && !strings.HasPrefix(src, "//") {
+			s.SetAttr("src", proxyPrefix+strings.TrimPrefix(src, "/"))
+		}
+	})
+
+	doc.Find("a[href]").Each(func(i int, s *goquery.Selection) {
+		href, exists := s.Attr("href")
+		if exists {
+			if strings.HasPrefix(href, "/") && !strings.HasPrefix(href, "//") {
+				s.SetAttr("href", proxyPrefix+strings.TrimPrefix(href, "/"))
+			} else if strings.HasPrefix(href, "https://"+originalHost) {
+				s.SetAttr("href", "/https://"+originalHost+"/"+strings.TrimPrefix(href, "https://"+originalHost+"/"))
+			}
+		}
+	})
+
+	doc.Find("link[href]").Each(func(i int, s *goquery.Selection) {
+		href, exists := s.Attr("href")
+		if exists && strings.HasPrefix(href, "/") && !strings.HasPrefix(href, "//") {
+			s.SetAttr("href", proxyPrefix+strings.TrimPrefix(href, "/"))
+		}
+	})
+
+	doc.Find("form[action]").Each(func(i int, s *goquery.Selection) {
+		action, exists := s.Attr("action")
+		if exists && strings.HasPrefix(action, "/") && !strings.HasPrefix(action, "//") {
+			s.SetAttr("action", proxyPrefix+strings.TrimPrefix(action, "/"))
+		}
+	})
+}
+
+// applyInjectionsDoc applies content injections on an existing GoQuery doc
+func applyInjectionsDoc(doc *goquery.Document, injections []struct {
+	Position string `yaml:"position,omitempty"`
+	Append   string `yaml:"append,omitempty"`
+	Prepend  string `yaml:"prepend,omitempty"`
+	Replace  string `yaml:"replace,omitempty"`
+}) {
+	if len(injections) == 0 {
+		return
+	}
+
+	for _, injection := range injections {
+		targetSelector := "head"
+		injectionContent := ""
+
+		if injection.Append != "" {
+			injectionContent = injection.Append
+		} else if injection.Prepend != "" {
+			injectionContent = injection.Prepend
+		} else if injection.Replace != "" {
+			injectionContent = injection.Replace
+		}
+
+		switch injection.Position {
+		case "head":
+			targetSelector = "head"
+		case "body":
+			targetSelector = "body"
+		case "html":
+			targetSelector = "html"
+		default:
+			if strings.Contains(injection.Position, ".") || strings.Contains(injection.Position, "#") || strings.Contains(injection.Position, "[") {
+				targetSelector = injection.Position
+			} else {
+				targetSelector = "head"
+			}
+		}
+
+		target := doc.Find(targetSelector)
+		if target.Length() > 0 {
+			if injection.Replace != "" {
+				target.SetHtml(injectionContent)
+			} else if injection.Prepend != "" {
+				target.PrependHtml(injectionContent)
+			} else {
+				target.AppendHtml(injectionContent)
+			}
+		} else {
+			headTarget := doc.Find("head")
+			if headTarget.Length() > 0 {
+				headTarget.AppendHtml(injectionContent)
+			}
+		}
+	}
+}
+
+// applyBlockScripts removes script/link elements matching patterns (#7)
+func applyBlockScripts(doc *goquery.Document, patterns []string) {
+	compiled := make([]*regexp.Regexp, 0, len(patterns))
+	for _, pattern := range patterns {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			fmt.Printf("Invalid blockScripts regex: %s\n", pattern)
+			continue
+		}
+		compiled = append(compiled, re)
+	}
+
+	doc.Find("script[src]").Each(func(i int, s *goquery.Selection) {
+		src, exists := s.Attr("src")
+		if !exists {
+			return
+		}
+		for _, re := range compiled {
+			if re.MatchString(src) {
+				s.Remove()
+				return
+			}
+		}
+	})
+
+	doc.Find("link[href]").Each(func(i int, s *goquery.Selection) {
+		href, exists := s.Attr("href")
+		if !exists {
+			return
+		}
+		for _, re := range compiled {
+			if re.MatchString(href) {
+				s.Remove()
+				return
+			}
+		}
+	})
+}
+
+// applyBlockJsInline removes all inline scripts if the page URL matches the pattern (#12)
+func applyBlockJsInline(doc *goquery.Document, pattern, pageURL string) {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		fmt.Printf("Invalid blockJsInline regex: %s\n", pattern)
+		return
+	}
+
+	if !re.MatchString(pageURL) {
+		return
+	}
+
+	doc.Find("script:not([src])").Each(func(i int, s *goquery.Selection) {
+		s.Remove()
+	})
+}
+
+// applyCsCode applies content script DOM operations (#9)
+func applyCsCode(doc *goquery.Document, ops []CsCodeOp) {
+	for _, op := range ops {
+		// hide_elem: hide elements matching selector
+		if op.HideElem != "" {
+			doc.Find(op.HideElem).Each(func(i int, s *goquery.Selection) {
+				existing, _ := s.Attr("style")
+				if existing != "" {
+					s.SetAttr("style", existing+";display:none!important")
+				} else {
+					s.SetAttr("style", "display:none!important")
+				}
+			})
+		}
+
+		// Operations that require a condition selector
+		if op.Cond != "" {
+			if op.RmElem {
+				doc.Find(op.Cond).Remove()
+			}
+
+			if op.RmClass != "" {
+				classes := strings.Fields(op.RmClass)
+				doc.Find(op.Cond).Each(func(i int, s *goquery.Selection) {
+					for _, cls := range classes {
+						s.RemoveClass(cls)
+					}
+				})
+			}
+
+			if op.RmAttrib != "" {
+				doc.Find(op.Cond).Each(func(i int, s *goquery.Selection) {
+					s.RemoveAttr(op.RmAttrib)
+				})
+			}
+
+			if op.SetAttrib != "" {
+				parts := strings.SplitN(op.SetAttrib, "|", 2)
+				if len(parts) == 2 {
+					doc.Find(op.Cond).Each(func(i int, s *goquery.Selection) {
+						s.SetAttr(parts[0], parts[1])
+					})
+				}
+			}
+		}
+
+		// add_style: inject CSS into head
+		if op.AddStyle != "" {
+			doc.Find("head").AppendHtml("<style>" + op.AddStyle + "</style>")
+		}
+	}
+}
+
+// applyAmpUnhide removes AMP access-hiding attributes (#10)
+func applyAmpUnhide(doc *goquery.Document) {
+	doc.Find(`[subscriptions-section="content-not-granted"]`).Remove()
+	doc.Find("[subscriptions-section]").Each(func(i int, s *goquery.Selection) {
+		s.RemoveAttr("subscriptions-section")
+	})
+	doc.Find("[amp-access-hide]").Each(func(i int, s *goquery.Selection) {
+		s.RemoveAttr("amp-access-hide")
+	})
+}
+
 // parseRuleset parses the embedded YAML ruleset using yaml.v3
 func parseRuleset() {
 	err := yaml.Unmarshal([]byte(embeddedRuleset), &parsedRules)
@@ -698,6 +1013,23 @@ func findRuleForDomainAndPath(domain, path string) Rule {
 					continue
 				}
 			}
+			// #19: Check path exclusions
+			if len(rule.PathExclusions) > 0 {
+				excluded := false
+				for _, pattern := range rule.PathExclusions {
+					re, err := regexp.Compile(pattern)
+					if err != nil {
+						continue
+					}
+					if re.MatchString(path) {
+						excluded = true
+						break
+					}
+				}
+				if excluded {
+					continue
+				}
+			}
 			return rule
 		}
 		// Check domains list
@@ -713,6 +1045,23 @@ func findRuleForDomainAndPath(domain, path string) Rule {
 						}
 					}
 					if !matchesPath {
+						continue
+					}
+				}
+				// #19: Check path exclusions
+				if len(rule.PathExclusions) > 0 {
+					excluded := false
+					for _, pattern := range rule.PathExclusions {
+						re, err := regexp.Compile(pattern)
+						if err != nil {
+							continue
+						}
+						if re.MatchString(path) {
+							excluded = true
+							break
+						}
+					}
+					if excluded {
 						continue
 					}
 				}
