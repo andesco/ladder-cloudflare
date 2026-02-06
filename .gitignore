@@ -37,3 +37,7 @@ GEMINI.md
 .bash_aliases
 .zsh_aliases
 aliases
+
+# Auto-generated rulesets
+ruleset.yaml
+ruleset-bpc.yaml
