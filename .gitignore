@@ -54,6 +54,7 @@ public/wasm_exec.js
 # Build scratch/output
 .tmp_bpc/
 test-urls.json
+output/
 
 # macOS Finder alias (local convenience, not source)
 bypass-manifest-cloudflare
