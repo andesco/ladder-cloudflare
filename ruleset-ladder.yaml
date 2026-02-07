@@ -221,7 +221,8 @@
 
 - domain: ft.com
   headers:
-    referer: https://t.co/x?amp=1
+    user-agent: Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)
+    referer: https://www.google.com/
     content-security-policy: "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:;"
   injections:
     - position: head
@@ -230,9 +231,13 @@
           document.addEventListener("DOMContentLoaded", () => {
             const styleTags = document.querySelectorAll('link[rel="stylesheet"]');
             styleTags.forEach(el => { 
-              const href = el.getAttribute('href').substring(1);
-              const updatedHref = href.replace(/(https?:\/\/.+?)\/{2,}/, '$1/');
-              el.setAttribute('href', updatedHref);
+              const href = el.getAttribute('href');
+              if (!href) return;
+              // Only de-proxy stylesheet URLs ("/https://...") to avoid breaking absolute "https://..." hrefs.
+              if (href.startsWith('/https://') || href.startsWith('/http://')) {
+                const updatedHref = href.slice(1).replace(/(https?:\/\/.+?)\/{2,}/, '$1/');
+                el.setAttribute('href', updatedHref);
+              }
             });
             setTimeout(() => {
               const cookie = document.querySelectorAll('.o-cookie-message, .js-article-ribbon, .o-ads, .o-banner, .o-message, .article__content-sign-up');
