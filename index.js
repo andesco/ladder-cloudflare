@@ -215,8 +215,42 @@ async function fetchProxiedContent(targetURL, rulesetMode) {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
 
-    let content = await response.text();
+    const contentType = response.headers.get('Content-Type') || '';
     const originHeaders = copyResponseHeaders(response);
+
+    const isHtml = contentType.includes('text/html') || contentType.includes('application/xhtml+xml');
+
+    // Do not run HTML rewriting/WASM DOM processing on non-HTML assets (JS/CSS/images/fonts/etc).
+    // Doing so corrupts the payload (e.g. JS becomes HTML-escaped) and breaks rendering.
+    if (!isHtml) {
+      const isTextLike =
+        contentType.startsWith('text/') ||
+        contentType.includes('javascript') ||
+        contentType.includes('json') ||
+        contentType.includes('xml') ||
+        contentType.includes('svg');
+
+      let body = response.body;
+
+      // For text-like assets, return a string body (lets callers like /api stringify the payload).
+      // Keep as close to origin as possible; avoid DOM processing.
+      if (isTextLike) {
+        body = await response.text();
+      }
+
+      return {
+        status: response.status,
+        body,
+        headers: {
+          'Content-Type': contentType || 'application/octet-stream',
+          'Cache-Control': 'public, max-age=300'
+        },
+        requestHeaders,
+        originHeaders
+      };
+    }
+
+    let content = await response.text();
 
     // Process content through WASM (applies rules, injections, regex)
     const processedResult = globalThis.processContent ? globalThis.processContent(content, targetURL, rulesetMode || 'merged') : null;
