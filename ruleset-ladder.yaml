@@ -188,8 +188,8 @@
       - key: amp
         value: 1
   tests:
-    url: https://www.tagesspiegel.de/politik/impfungen-in-deutschland-und-der-welt-der-aktuelle-stand-der-impfkampagne/26809888.html
-    test: document.querySelector('html').classList.contains('amp-mode')
+    - url: https://www.tagesspiegel.de/politik/impfungen-in-deutschland-und-der-welt-der-aktuelle-stand-der-impfkampagne/26809888.html
+      test: document.querySelector('html').classList.contains('amp-mode')
 
 - domain: www.nzz.ch
   paths:
@@ -325,4 +325,3 @@
   tests:
     - url: https://kw.be/nieuws/criminaliteit/geweld/in-40-jaar-nog-nooit-meegemaakt-chauffeur-meense-touroperator-krijgt-slag-in-gezicht-na-aanrijding-in-frankrijk/
       test: document.querySelector('#paywall-modal') === null
-

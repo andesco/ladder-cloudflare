@@ -85,7 +85,7 @@ Ladderflare does not support these legacy variables:
 
 ### Ruleset Examples
 
-See example rules and the canonical ruleset in [`everywall/ladder-rules`][ladder-rules] and [`ruleset.yaml`][ruleset-examples].
+See example rules and the canonical Ladder rules in [`everywall/ladder-rules`][ladder-rules]. This repo embeds generated JSON rulesets during build (not committed).
 
 ## Development
 
@@ -109,7 +109,7 @@ sequenceDiagram
 ### Build Commands
 
 ```bash
-npm run build:rules   # download latest ruleset from ladder-rules repository
+npm run build:rules   # fetch latest BPC sites list and merge with local Ladder rules
 npm run build:wasm    # compile WebAssembly binary
 npm run build
 npm run dev:local     # run locally using wrangler.local.toml
@@ -119,20 +119,23 @@ npm run deploy
 
 ### WebAssembly Implementation
 
-- **rule parsing**: `gopkg.in/yaml.v3` loads the embedded ruleset
+- **rule parsing**: embedded JSON rulesets are loaded via `encoding/json`
 - **HTML manipulation**: `goquery` applies DOM-level modifications in WASM
 - **JavaScript interoperability**: `syscall/js` bridges WASM to the Worker, while fetch runs in `index.js`
 - **edge deployment**: tuned for Cloudflare Workers execution
 
 ### WebAssembly Build Process
 
-1. `ruleset.yaml` downloaded from [`everywall/ladder-rules`][ladder-rules]
+1. Generate embed rulesets:
+   - `ruleset-bpc-embedded.json` (BPC-only)
+   - `ruleset-ladder-embedded.json` (Ladder-only, from `ruleset-ladder.yaml`)
+   - `ruleset-embedded.json` (merged output for `/ruleset` + `/test`)
 2. `GOOS=js GOARCH=wasm go build -ldflags="-s -w" -tags=wasm`
 3. `go:embed` embedds rules directly into WASM binary
 
 ```mermaid
 flowchart LR
-    Ruleset[ruleset.yaml] --> Build[WASM build + embed]
+    Rulesets[embedded JSON rulesets] --> Build[WASM build + embed]
     Ladder[ladder Go code] --> Build
     Build --> Worker[Cloudflare Worker bundle]
     Worker --> Deploy[Workers deployment]
@@ -154,6 +157,6 @@ Ladderflare is licensed under the [MIT License](LICENSE).
 
 [ladder]: https://github.com/everywall/ladder
 [ladder-rules]: https://github.com/everywall/ladder-rules
-[ruleset-examples]: https://github.com/everywall/ladder-rules/blob/main/ruleset.yaml
+[ruleset-examples]: ruleset-embedded.json
 [ladder-shortcut]: https://github.com/andesco/ladder-shortcut
 [ladderflare]: https://github.com/andesco/ladder-cloudflare
