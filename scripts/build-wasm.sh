@@ -5,8 +5,8 @@ set -e
 echo "Building Ladderflare WASM..."
 
 # Ensure we have the ruleset
-if [ ! -f "ruleset.yaml" ]; then
-    echo "Error: ruleset.yaml not found. Run 'npm run build:rules' first."
+if [ ! -f "ruleset-embedded.json" ] || [ ! -f "ruleset-bpc-embedded.json" ] || [ ! -f "ruleset-ladder-embedded.json" ]; then
+    echo "Error: embedded rulesets not found. Run 'npm run build:rules' first."
     exit 1
 fi
 

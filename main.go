@@ -2,6 +2,7 @@ package main
 
 import (
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net/url"
@@ -11,93 +12,99 @@ import (
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
-	"gopkg.in/yaml.v3"
 )
 
-//go:embed ruleset.yaml
+//go:embed ruleset-embedded.json
 var embeddedRuleset string
 
-//go:embed ruleset-manual.yaml
-var embeddedManualRuleset string
+//go:embed ruleset-ladder-embedded.json
+var embeddedLadderRuleset string
 
-//go:embed ruleset-bpc.yaml
+//go:embed ruleset-bpc-embedded.json
 var embeddedBPCRuleset string
 
 var (
-	UserAgent         = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
-	ForwardedFor      = "66.249.66.1"
-	parsedRules       RuleSet // merged (default)
-	parsedManualRules RuleSet // manual-only (for /yaml/ routes)
-	parsedBPCRules    RuleSet // BPC-only (for /json/ routes)
-	random            = rand.New(rand.NewSource(time.Now().UnixNano()))
+	UserAgent                = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+	ForwardedFor             = "66.249.66.1"
+	parsedRules              RuleSet // merged (default)
+	parsedLadderRules        RuleSet // ladder-only (for /yaml/ routes)
+	parsedBPCRules           RuleSet // BPC-only (for /json/ routes)
+	globalBlockScriptsMerged []string
+	globalBlockScriptsLadder []string
+	globalBlockScriptsBPC    []string
+	random                   = rand.New(rand.NewSource(time.Now().UnixNano()))
 )
 
-// Full-featured rule structures with yaml.v3 support (matching ladder/pkg/ruleset)
+// Full-featured rule structures with YAML/JSON tags (matching ladder/pkg/ruleset)
 type Regex struct {
-	Match   string `yaml:"match"`
-	Replace string `yaml:"replace"`
+	Match   string `yaml:"match" json:"match"`
+	Replace any    `yaml:"replace" json:"replace"`
 }
 
 type KV struct {
-	Key   string `yaml:"key"`
-	Value string `yaml:"value"`
+	Key   string `yaml:"key" json:"key"`
+	Value any    `yaml:"value" json:"value"`
+}
+
+type Injection struct {
+	Position string `yaml:"position,omitempty" json:"position,omitempty"`
+	Append   string `yaml:"append,omitempty" json:"append,omitempty"`
+	Prepend  string `yaml:"prepend,omitempty" json:"prepend,omitempty"`
+	Replace  string `yaml:"replace,omitempty" json:"replace,omitempty"`
+}
+
+type TestCase struct {
+	URL  string `yaml:"url,omitempty" json:"url,omitempty"`
+	Test string `yaml:"test,omitempty" json:"test,omitempty"`
 }
 
 type CsCodeOp struct {
-	Cond     string `yaml:"cond,omitempty"`
-	HideElem string `yaml:"hide_elem,omitempty"`
-	RmElem   bool   `yaml:"rm_elem,omitempty"`
-	RmClass  string `yaml:"rm_class,omitempty"`
-	RmAttrib string `yaml:"rm_attrib,omitempty"`
-	SetAttrib string `yaml:"set_attrib,omitempty"` // "attr|value" format
-	AddStyle string `yaml:"add_style,omitempty"`
+	Cond      string `yaml:"cond,omitempty" json:"cond,omitempty"`
+	HideElem  string `yaml:"hide_elem,omitempty" json:"hide_elem,omitempty"`
+	RmElem    bool   `yaml:"rm_elem,omitempty" json:"rm_elem,omitempty"`
+	RmClass   string `yaml:"rm_class,omitempty" json:"rm_class,omitempty"`
+	RmAttrib  string `yaml:"rm_attrib,omitempty" json:"rm_attrib,omitempty"`
+	SetAttrib string `yaml:"set_attrib,omitempty" json:"set_attrib,omitempty"` // "attr|value" format
+	AddStyle  string `yaml:"add_style,omitempty" json:"add_style,omitempty"`
 }
 
 type RuleSet []Rule
 
 type Rule struct {
-	Domain  string   `yaml:"domain,omitempty"`
-	Domains []string `yaml:"domains,omitempty"`
-	Paths   []string `yaml:"paths,omitempty"`
+	Domain  string   `yaml:"domain,omitempty" json:"domain,omitempty"`
+	Domains []string `yaml:"domains,omitempty" json:"domains,omitempty"`
+	Paths   []string `yaml:"paths,omitempty" json:"paths,omitempty"`
 	Headers struct {
-		UserAgent     string `yaml:"user-agent,omitempty"`
-		XForwardedFor string `yaml:"x-forwarded-for,omitempty"`
-		Referer       string `yaml:"referer,omitempty"`
-		Cookie        string `yaml:"cookie,omitempty"`
-		CSP           string `yaml:"content-security-policy,omitempty"`
-	} `yaml:"headers,omitempty"`
-	GoogleCache bool    `yaml:"googleCache,omitempty"`
-	RegexRules  []Regex `yaml:"regexRules,omitempty"`
+		UserAgent     string `yaml:"user-agent,omitempty" json:"user-agent,omitempty"`
+		XForwardedFor string `yaml:"x-forwarded-for,omitempty" json:"x-forwarded-for,omitempty"`
+		Referer       string `yaml:"referer,omitempty" json:"referer,omitempty"`
+		Cookie        string `yaml:"cookie,omitempty" json:"cookie,omitempty"`
+		CSP           string `yaml:"content-security-policy,omitempty" json:"content-security-policy,omitempty"`
+	} `yaml:"headers,omitempty" json:"headers,omitempty"`
+	GoogleCache bool    `yaml:"googleCache,omitempty" json:"googleCache,omitempty"`
+	RegexRules  []Regex `yaml:"regexRules,omitempty" json:"regexRules,omitempty"`
 
 	URLMods struct {
-		Domain []Regex `yaml:"domain,omitempty"`
-		Path   []Regex `yaml:"path,omitempty"`
-		Query  []KV    `yaml:"query,omitempty"`
-	} `yaml:"urlMods,omitempty"`
+		Domain []Regex `yaml:"domain,omitempty" json:"domain,omitempty"`
+		Path   []Regex `yaml:"path,omitempty" json:"path,omitempty"`
+		Query  []KV    `yaml:"query,omitempty" json:"query,omitempty"`
+	} `yaml:"urlMods,omitempty" json:"urlMods,omitempty"`
 
-	Injections []struct {
-		Position string `yaml:"position,omitempty"`
-		Append   string `yaml:"append,omitempty"`
-		Prepend  string `yaml:"prepend,omitempty"`
-		Replace  string `yaml:"replace,omitempty"`
-	} `yaml:"injections,omitempty"`
+	Injections []Injection `yaml:"injections,omitempty" json:"injections,omitempty"`
 
-	Tests []struct {
-		URL  string `yaml:"url,omitempty"`
-		Test string `yaml:"test,omitempty"`
-	} `yaml:"tests,omitempty"`
+	Tests []TestCase `yaml:"tests,omitempty" json:"tests,omitempty"`
 
 	// BPC integration fields
-	RandomIP            string            `yaml:"randomIP,omitempty"`
-	BlockScripts        []string          `yaml:"blockScripts,omitempty"`
-	BlockScriptsGeneral []string          `yaml:"blockScriptsGeneral,omitempty"`
-	ExcludedDomains     []string          `yaml:"excludedDomains,omitempty"`
-	CsCode              []CsCodeOp        `yaml:"csCode,omitempty"`
-	AmpUnhide           bool              `yaml:"ampUnhide,omitempty"`
-	BlockJsInline       string            `yaml:"blockJsInline,omitempty"`
-	ClearStorage        bool              `yaml:"clearStorage,omitempty"`
-	PathExclusions      []string          `yaml:"pathExclusions,omitempty"`
-	ExtraHeaders        map[string]string `yaml:"extraHeaders,omitempty"`
+	RandomIP            string            `yaml:"randomIP,omitempty" json:"randomIP,omitempty"`
+	BlockScripts        []string          `yaml:"blockScripts,omitempty" json:"blockScripts,omitempty"`
+	BlockScriptsGeneral []string          `yaml:"blockScriptsGeneral,omitempty" json:"blockScriptsGeneral,omitempty"`
+	ExcludedDomains     []string          `yaml:"excludedDomains,omitempty" json:"excludedDomains,omitempty"`
+	CsCode              []CsCodeOp        `yaml:"csCode,omitempty" json:"csCode,omitempty"`
+	AmpUnhide           bool              `yaml:"ampUnhide,omitempty" json:"ampUnhide,omitempty"`
+	BlockJsInline       string            `yaml:"blockJsInline,omitempty" json:"blockJsInline,omitempty"`
+	ClearStorage        bool              `yaml:"clearStorage,omitempty" json:"clearStorage,omitempty"`
+	PathExclusions      []string          `yaml:"pathExclusions,omitempty" json:"pathExclusions,omitempty"`
+	ExtraHeaders        map[string]string `yaml:"extraHeaders,omitempty" json:"extraHeaders,omitempty"`
 }
 
 func main() {
@@ -530,7 +537,7 @@ func createRulesetResponse() js.Value {
 	result.Set("body", embeddedRuleset)
 
 	headers := js.Global().Get("Object").New()
-	headers.Set("Content-Type", "application/x-yaml")
+	headers.Set("Content-Type", "application/json; charset=utf-8")
 	result.Set("headers", headers)
 
 	return result
@@ -611,7 +618,7 @@ func processContent(this js.Value, args []js.Value) interface{} {
 			fmt.Printf("Invalid regex: %s\n", regexRule.Match)
 			continue
 		}
-		content = re.ReplaceAllString(content, regexRule.Replace)
+		content = re.ReplaceAllString(content, fmt.Sprint(regexRule.Replace))
 	}
 
 	// Step 2: Parse HTML into GoQuery doc once
@@ -629,9 +636,13 @@ func processContent(this js.Value, args []js.Value) interface{} {
 		return result
 	}
 
-	// Step 3: Block scripts (#7)
-	if len(rule.BlockScripts) > 0 {
-		applyBlockScripts(doc, rule.BlockScripts)
+	// Step 3: Block scripts (#7) including shared/general patterns
+	blockPatterns := make([]string, 0, len(rule.BlockScripts)+len(rule.BlockScriptsGeneral))
+	blockPatterns = append(blockPatterns, rule.BlockScripts...)
+	blockPatterns = append(blockPatterns, rule.BlockScriptsGeneral...)
+	blockPatterns = append(blockPatterns, globalBlockPatternsForMode(rulesetMode)...)
+	if len(blockPatterns) > 0 {
+		applyBlockScripts(doc, blockPatterns)
 	}
 
 	// Step 4: Block inline JS (#12)
@@ -684,12 +695,7 @@ func processContent(this js.Value, args []js.Value) interface{} {
 }
 
 // applyContentInjections applies content injections using GoQuery for DOM manipulation
-func applyContentInjections(content string, injections []struct {
-	Position string `yaml:"position,omitempty"`
-	Append   string `yaml:"append,omitempty"`
-	Prepend  string `yaml:"prepend,omitempty"`
-	Replace  string `yaml:"replace,omitempty"`
-}) string {
+func applyContentInjections(content string, injections []Injection) string {
 	if len(injections) == 0 {
 		return content
 	}
@@ -765,12 +771,7 @@ func applyContentInjections(content string, injections []struct {
 }
 
 // applyContentInjectionsStringFallback provides string-based injection as fallback
-func applyContentInjectionsStringFallback(content string, injections []struct {
-	Position string `yaml:"position,omitempty"`
-	Append   string `yaml:"append,omitempty"`
-	Prepend  string `yaml:"prepend,omitempty"`
-	Replace  string `yaml:"replace,omitempty"`
-}) string {
+func applyContentInjectionsStringFallback(content string, injections []Injection) string {
 	for _, injection := range injections {
 		injectionContent := ""
 		if injection.Append != "" {
@@ -840,12 +841,7 @@ func rewriteHTMLDoc(doc *goquery.Document, originalHost string) {
 }
 
 // applyInjectionsDoc applies content injections on an existing GoQuery doc
-func applyInjectionsDoc(doc *goquery.Document, injections []struct {
-	Position string `yaml:"position,omitempty"`
-	Append   string `yaml:"append,omitempty"`
-	Prepend  string `yaml:"prepend,omitempty"`
-	Replace  string `yaml:"replace,omitempty"`
-}) {
+func applyInjectionsDoc(doc *goquery.Document, injections []Injection) {
 	if len(injections) == 0 {
 		return
 	}
@@ -1015,38 +1011,152 @@ func applyAmpUnhide(doc *goquery.Document) {
 	})
 }
 
-// parseRuleset parses the embedded YAML rulesets using yaml.v3
+// parseRuleset parses the embedded rulesets (embedded JSON for runtime efficiency)
 func parseRuleset() {
-	// Parse merged ruleset
-	err := yaml.Unmarshal([]byte(embeddedRuleset), &parsedRules)
+	// Parse merged ruleset (JSON)
+	err := json.Unmarshal([]byte(embeddedRuleset), &parsedRules)
 	if err != nil {
-		fmt.Printf("Error parsing merged YAML ruleset: %v\n", err)
+		fmt.Printf("Error parsing merged JSON ruleset: %v\n", err)
 		return
 	}
-	fmt.Printf("Successfully parsed %d merged rules from embedded YAML\n", len(parsedRules))
+	fmt.Printf("Successfully parsed %d merged rules from embedded JSON\n", len(parsedRules))
+	globalBlockScriptsMerged = collectGlobalBlockScripts(parsedRules)
 
-	// Parse manual-only ruleset
-	err = yaml.Unmarshal([]byte(embeddedManualRuleset), &parsedManualRules)
+	// Parse ladder-only ruleset
+	err = json.Unmarshal([]byte(embeddedLadderRuleset), &parsedLadderRules)
 	if err != nil {
-		fmt.Printf("Error parsing manual YAML ruleset: %v\n", err)
+		fmt.Printf("Error parsing ladder JSON ruleset: %v\n", err)
 		return
 	}
-	fmt.Printf("Successfully parsed %d manual rules from embedded YAML\n", len(parsedManualRules))
+	fmt.Printf("Successfully parsed %d ladder rules from embedded JSON\n", len(parsedLadderRules))
+	globalBlockScriptsLadder = collectGlobalBlockScripts(parsedLadderRules)
 
-	// Parse BPC-only ruleset
-	err = yaml.Unmarshal([]byte(embeddedBPCRuleset), &parsedBPCRules)
+	// Parse BPC-only ruleset (JSON)
+	err = json.Unmarshal([]byte(embeddedBPCRuleset), &parsedBPCRules)
 	if err != nil {
-		fmt.Printf("Error parsing BPC YAML ruleset: %v\n", err)
+		fmt.Printf("Error parsing BPC JSON ruleset: %v\n", err)
 		return
 	}
-	fmt.Printf("Successfully parsed %d BPC rules from embedded YAML\n", len(parsedBPCRules))
+	fmt.Printf("Successfully parsed %d BPC rules from embedded JSON\n", len(parsedBPCRules))
+	globalBlockScriptsBPC = collectGlobalBlockScripts(parsedBPCRules)
+}
+
+// collectGlobalBlockScripts gathers unique blockScriptsGeneral patterns from a ruleset
+func collectGlobalBlockScripts(rules RuleSet) []string {
+	seen := make(map[string]struct{})
+	patterns := make([]string, 0)
+
+	for _, rule := range rules {
+		for _, pattern := range rule.BlockScriptsGeneral {
+			if pattern == "" {
+				continue
+			}
+			if _, exists := seen[pattern]; exists {
+				continue
+			}
+			seen[pattern] = struct{}{}
+			patterns = append(patterns, pattern)
+		}
+	}
+
+	return patterns
+}
+
+// globalBlockPatternsForMode returns blockScriptsGeneral entries for the active ruleset
+func globalBlockPatternsForMode(mode string) []string {
+	switch mode {
+	case "yaml":
+		return globalBlockScriptsLadder
+	case "json":
+		return globalBlockScriptsBPC
+	default:
+		return globalBlockScriptsMerged
+	}
+}
+
+// mergeRuleOverlay combines two rules into an "effective" rule. This is used for
+// merged mode so Ladder rules can layer on top of BPC rules even when the BPC
+// match is for a parent domain (e.g. nytimes.com) and Ladder is a subdomain
+// (e.g. www.nytimes.com).
+//
+// Precedence:
+// - BPC is the base (headers, blockScripts, csCode, etc)
+// - Ladder adds/overlays client-side behavior (regexRules, injections, tests, urlMods)
+// - For single-value fields (headers, blockJsInline, randomIP), BPC wins and Ladder fills blanks
+func mergeRuleOverlay(bpc Rule, ladder Rule) Rule {
+	merged := bpc
+
+	// Keep domain fields for debugging when BPC doesn't match.
+	if merged.Domain == "" && len(merged.Domains) == 0 {
+		merged.Domain = ladder.Domain
+		merged.Domains = ladder.Domains
+	}
+
+	// Headers: BPC wins, Ladder fills gaps.
+	if merged.Headers.UserAgent == "" {
+		merged.Headers.UserAgent = ladder.Headers.UserAgent
+	}
+	if merged.Headers.XForwardedFor == "" {
+		merged.Headers.XForwardedFor = ladder.Headers.XForwardedFor
+	}
+	if merged.Headers.Referer == "" {
+		merged.Headers.Referer = ladder.Headers.Referer
+	}
+	if merged.Headers.Cookie == "" {
+		merged.Headers.Cookie = ladder.Headers.Cookie
+	}
+	if merged.Headers.CSP == "" {
+		merged.Headers.CSP = ladder.Headers.CSP
+	}
+
+	// URL modifications: apply BPC first, then Ladder.
+	merged.URLMods.Domain = append(merged.URLMods.Domain, ladder.URLMods.Domain...)
+	merged.URLMods.Path = append(merged.URLMods.Path, ladder.URLMods.Path...)
+	merged.URLMods.Query = append(merged.URLMods.Query, ladder.URLMods.Query...)
+
+	// Other single-value fields.
+	merged.GoogleCache = merged.GoogleCache || ladder.GoogleCache
+	if merged.RandomIP == "" {
+		merged.RandomIP = ladder.RandomIP
+	}
+	if merged.BlockJsInline == "" {
+		merged.BlockJsInline = ladder.BlockJsInline
+	}
+	merged.AmpUnhide = merged.AmpUnhide || ladder.AmpUnhide
+	merged.ClearStorage = merged.ClearStorage || ladder.ClearStorage
+
+	// List fields: combine.
+	merged.RegexRules = append(merged.RegexRules, ladder.RegexRules...)
+	merged.Injections = append(merged.Injections, ladder.Injections...)
+	merged.Tests = append(merged.Tests, ladder.Tests...)
+
+	merged.BlockScripts = append(merged.BlockScripts, ladder.BlockScripts...)
+	merged.BlockScriptsGeneral = append(merged.BlockScriptsGeneral, ladder.BlockScriptsGeneral...)
+	merged.CsCode = append(merged.CsCode, ladder.CsCode...)
+
+	merged.ExcludedDomains = append(merged.ExcludedDomains, ladder.ExcludedDomains...)
+	merged.PathExclusions = append(merged.PathExclusions, ladder.PathExclusions...)
+
+	// Extra headers: BPC wins, Ladder fills gaps.
+	if len(ladder.ExtraHeaders) > 0 {
+		if merged.ExtraHeaders == nil {
+			merged.ExtraHeaders = map[string]string{}
+		}
+		for k, v := range ladder.ExtraHeaders {
+			if _, exists := merged.ExtraHeaders[k]; !exists {
+				merged.ExtraHeaders[k] = v
+			}
+		}
+	}
+
+	return merged
 }
 
 // selectRuleset returns the appropriate ruleset based on mode
 func selectRuleset(mode string) RuleSet {
 	switch mode {
 	case "yaml":
-		return parsedManualRules
+		return parsedLadderRules
 	case "json":
 		return parsedBPCRules
 	default:
@@ -1066,8 +1176,17 @@ func findRuleForDomainAndPath(domain, path string) Rule {
 
 // findRuleForDomainAndPathWithMode finds the matching rule using the specified ruleset mode
 func findRuleForDomainAndPathWithMode(domain, path, mode string) Rule {
-	rules := selectRuleset(mode)
-	return findRuleForDomainAndPathInRuleset(domain, path, rules)
+	switch mode {
+	case "yaml":
+		return findRuleForDomainAndPathInRuleset(domain, path, parsedLadderRules)
+	case "json":
+		return findRuleForDomainAndPathInRuleset(domain, path, parsedBPCRules)
+	default:
+		// Layer Ladder on top of BPC for merged mode.
+		bpcRule := findRuleForDomainAndPathInRuleset(domain, path, parsedBPCRules)
+		ladderRule := findRuleForDomainAndPathInRuleset(domain, path, parsedLadderRules)
+		return mergeRuleOverlay(bpcRule, ladderRule)
+	}
 }
 
 // findRuleForDomainAndPathInRuleset finds the matching rule in a specific ruleset
@@ -1164,7 +1283,7 @@ func applyURLModifications(targetURL string, rule Rule) string {
 		if err != nil {
 			continue
 		}
-		parsedURL.Host = re.ReplaceAllString(parsedURL.Host, domainMod.Replace)
+		parsedURL.Host = re.ReplaceAllString(parsedURL.Host, fmt.Sprint(domainMod.Replace))
 	}
 
 	// Apply path modifications
@@ -1173,16 +1292,24 @@ func applyURLModifications(targetURL string, rule Rule) string {
 		if err != nil {
 			continue
 		}
-		parsedURL.Path = re.ReplaceAllString(parsedURL.Path, pathMod.Replace)
+		parsedURL.Path = re.ReplaceAllString(parsedURL.Path, fmt.Sprint(pathMod.Replace))
 	}
 
 	// Apply query modifications
 	values := parsedURL.Query()
 	for _, queryMod := range rule.URLMods.Query {
-		if queryMod.Value == "" {
+		switch v := queryMod.Value.(type) {
+		case nil:
 			values.Del(queryMod.Key)
-		} else {
-			values.Set(queryMod.Key, queryMod.Value)
+		case string:
+			if v == "" {
+				values.Del(queryMod.Key)
+			} else {
+				values.Set(queryMod.Key, v)
+			}
+		default:
+			// YAML parsing may preserve numbers/bools; JSON embed uses native JSON types.
+			values.Set(queryMod.Key, fmt.Sprint(v))
 		}
 	}
 	parsedURL.RawQuery = values.Encode()

@@ -5,9 +5,11 @@ const path = require('path');
 const yaml = require('yaml');
 
 const BPC_URL = 'https://bypass.andrewe.dev/sites_aggregated.json';
-const MANUAL_FILE = 'ruleset-manual.yaml';
-const OUTPUT_FILE = 'ruleset.yaml';
-const BPC_OUTPUT_FILE = 'ruleset-bpc.yaml';
+const LADDER_FILE = 'ruleset-ladder.yaml';
+// Faster-to-parse rulesets for WASM embedding (JSON). We do not generate YAML copies.
+const EMBED_OUTPUT_FILE = 'ruleset-embedded.json';
+const EMBED_BPC_OUTPUT_FILE = 'ruleset-bpc-embedded.json';
+const EMBED_LADDER_OUTPUT_FILE = 'ruleset-ladder-embedded.json';
 const TEST_URLS_FILE = 'test-urls.json';
 
 // Known user-agent strings
@@ -27,20 +29,20 @@ async function fetchBPC() {
   return resp.json();
 }
 
-function loadManualRules() {
-  const manualPath = path.resolve(MANUAL_FILE);
-  if (!fs.existsSync(manualPath)) {
-    console.log('No manual ruleset found at', manualPath);
+function loadLadderRules() {
+  const ladderPath = path.resolve(LADDER_FILE);
+  if (!fs.existsSync(ladderPath)) {
+    console.log('No ladder ruleset found at', ladderPath);
     return [];
   }
-  const data = fs.readFileSync(manualPath, 'utf-8');
+  const data = fs.readFileSync(ladderPath, 'utf-8');
   return yaml.parse(data) || [];
 }
 
-// Build a domain → manual rule index
-function indexManualRules(manualRules) {
+// Build a domain → Ladder rule index
+function indexLadderRules(ladderRules) {
   const index = {};
-  for (const rule of manualRules) {
+  for (const rule of ladderRules) {
     const domains = [];
     if (rule.domain) domains.push(rule.domain);
     if (rule.domains) domains.push(...rule.domains);
@@ -283,61 +285,61 @@ function regroupRules(rules) {
   return result;
 }
 
-// Merge BPC rule with manual rule: BPC provides headers/blocking, manual provides injections/tests/regexRules
-function mergeRules(bpcRule, manualRule) {
+// Merge BPC rule with Ladder rule: BPC provides headers/blocking, Ladder provides injections/tests/regexRules
+function mergeRules(bpcRule, ladderRule) {
   const merged = { ...bpcRule };
 
-  // Keep manual injections
-  if (manualRule.injections) {
-    merged.injections = manualRule.injections;
+  // Keep Ladder injections
+  if (ladderRule.injections) {
+    merged.injections = ladderRule.injections;
   }
 
-  // Keep manual tests
-  if (manualRule.tests) {
-    merged.tests = manualRule.tests;
+  // Keep Ladder tests
+  if (ladderRule.tests) {
+    merged.tests = ladderRule.tests;
   }
 
-  // Keep manual regexRules
-  if (manualRule.regexRules) {
-    merged.regexRules = manualRule.regexRules;
+  // Keep Ladder regexRules
+  if (ladderRule.regexRules) {
+    merged.regexRules = ladderRule.regexRules;
   }
 
-  // Keep manual paths
-  if (manualRule.paths) {
-    merged.paths = manualRule.paths;
+  // Keep Ladder paths
+  if (ladderRule.paths) {
+    merged.paths = ladderRule.paths;
   }
 
-  // Keep manual urlMods (unless BPC also has them, then merge)
-  if (manualRule.urlMods) {
+  // Keep Ladder urlMods (unless BPC also has them, then merge)
+  if (ladderRule.urlMods) {
     if (merged.urlMods) {
-      // Merge: BPC query + manual query etc
+      // Merge: BPC query + Ladder query etc
       merged.urlMods = {
-        domain: [...(merged.urlMods.domain || []), ...(manualRule.urlMods.domain || [])],
-        path: [...(merged.urlMods.path || []), ...(manualRule.urlMods.path || [])],
-        query: [...(merged.urlMods.query || []), ...(manualRule.urlMods.query || [])],
+        domain: [...(merged.urlMods.domain || []), ...(ladderRule.urlMods.domain || [])],
+        path: [...(merged.urlMods.path || []), ...(ladderRule.urlMods.path || [])],
+        query: [...(merged.urlMods.query || []), ...(ladderRule.urlMods.query || [])],
       };
       // Clean up empty arrays
       if (merged.urlMods.domain.length === 0) delete merged.urlMods.domain;
       if (merged.urlMods.path.length === 0) delete merged.urlMods.path;
       if (merged.urlMods.query.length === 0) delete merged.urlMods.query;
     } else {
-      merged.urlMods = manualRule.urlMods;
+      merged.urlMods = ladderRule.urlMods;
     }
   }
 
-  // Merge headers: BPC headers take precedence, manual headers fill gaps
-  if (manualRule.headers) {
+  // Merge headers: BPC headers take precedence, Ladder headers fill gaps
+  if (ladderRule.headers) {
     merged.headers = merged.headers || {};
-    for (const [key, val] of Object.entries(manualRule.headers)) {
+    for (const [key, val] of Object.entries(ladderRule.headers)) {
       if (!merged.headers[key]) {
         merged.headers[key] = val;
       }
     }
   }
 
-  // Keep manual googleCache
-  if (manualRule.googleCache) {
-    merged.googleCache = manualRule.googleCache;
+  // Keep Ladder googleCache
+  if (ladderRule.googleCache) {
+    merged.googleCache = ladderRule.googleCache;
   }
 
   return merged;
@@ -398,10 +400,12 @@ async function main() {
     const bpcData = await fetchBPC();
     console.log(`Fetched ${bpcData.length} BPC entries`);
 
-    // Step 2: Load manual rules
-    const manualRules = loadManualRules();
-    const manualIndex = indexManualRules(manualRules);
-    console.log(`Loaded ${manualRules.length} manual rules covering ${Object.keys(manualIndex).length} domains`);
+    // Step 2: Load Ladder rules
+    const ladderRules = loadLadderRules();
+    const ladderIndex = indexLadderRules(ladderRules);
+    console.log(`Loaded ${ladderRules.length} ladder rules covering ${Object.keys(ladderIndex).length} domains`);
+    fs.writeFileSync(EMBED_LADDER_OUTPUT_FILE, JSON.stringify(ladderRules));
+    console.log(`Generated ${EMBED_LADDER_OUTPUT_FILE} (JSON embed) with ${ladderRules.length} ladder rules`);
 
     // Step 3-4: Map BPC entries to Ladderflare rules
     const bpcRules = [];
@@ -424,36 +428,36 @@ async function main() {
 
     console.log(`Mapped ${bpcRules.length} BPC rules for ${seenDomains.size} domains`);
 
-    // Step 5: Merge with manual rules
+    // Step 5: Merge with Ladder rules
     const mergedRules = [];
-    const manualDomainsUsed = new Set();
+    const ladderDomainsUsed = new Set();
 
     for (const bpcRule of bpcRules) {
       const domain = bpcRule.domain;
-      const manualRule = manualIndex[domain];
+      const ladderRule = ladderIndex[domain];
 
-      if (manualRule) {
-        mergedRules.push(mergeRules(bpcRule, manualRule));
-        manualDomainsUsed.add(domain);
-        // Mark all domains in the manual rule as used
-        if (manualRule.domains) {
-          for (const d of manualRule.domains) manualDomainsUsed.add(d);
+      if (ladderRule) {
+        mergedRules.push(mergeRules(bpcRule, ladderRule));
+        ladderDomainsUsed.add(domain);
+        // Mark all domains in the Ladder rule as used
+        if (ladderRule.domains) {
+          for (const d of ladderRule.domains) ladderDomainsUsed.add(d);
         }
-        if (manualRule.domain) manualDomainsUsed.add(manualRule.domain);
+        if (ladderRule.domain) ladderDomainsUsed.add(ladderRule.domain);
       } else {
         mergedRules.push(bpcRule);
       }
     }
 
-    // Add manual-only rules (not covered by BPC)
-    for (const manualRule of manualRules) {
-      const manualDomains = [];
-      if (manualRule.domain) manualDomains.push(manualRule.domain);
-      if (manualRule.domains) manualDomains.push(...manualRule.domains);
+    // Add Ladder-only rules (not covered by BPC)
+    for (const ladderRule of ladderRules) {
+      const ladderDomains = [];
+      if (ladderRule.domain) ladderDomains.push(ladderRule.domain);
+      if (ladderRule.domains) ladderDomains.push(...ladderRule.domains);
 
-      const allUsed = manualDomains.every(d => manualDomainsUsed.has(d));
+      const allUsed = ladderDomains.every(d => ladderDomainsUsed.has(d));
       if (!allUsed) {
-        mergedRules.push(manualRule);
+        mergedRules.push(ladderRule);
       }
     }
 
@@ -470,17 +474,10 @@ async function main() {
       if (rule.domains) domainCount += rule.domains.length;
     }
 
-    // Generate YAML
-    const yamlOutput = yaml.stringify(cleanedRules, {
-      lineWidth: 0, // Don't wrap lines
-      defaultStringType: 'PLAIN',
-      defaultKeyType: 'PLAIN',
-    });
+    fs.writeFileSync(EMBED_OUTPUT_FILE, JSON.stringify(cleanedRules));
+    console.log(`Generated ${EMBED_OUTPUT_FILE} (JSON embed) with ${cleanedRules.length} rules covering ${domainCount} domains`);
 
-    fs.writeFileSync(OUTPUT_FILE, yamlOutput);
-    console.log(`Generated ${OUTPUT_FILE} with ${cleanedRules.length} rules covering ${domainCount} domains`);
-
-    // Generate BPC-only ruleset (without manual merge)
+    // Generate BPC-only ruleset (without Ladder merge)
     const bpcOnlyGrouped = regroupRules(bpcRules);
     const bpcOnlyCleaned = bpcOnlyGrouped.map(cleanRule);
 
@@ -491,14 +488,8 @@ async function main() {
       if (rule.domains) bpcDomainCount += rule.domains.length;
     }
 
-    const bpcYamlOutput = yaml.stringify(bpcOnlyCleaned, {
-      lineWidth: 0,
-      defaultStringType: 'PLAIN',
-      defaultKeyType: 'PLAIN',
-    });
-
-    fs.writeFileSync(BPC_OUTPUT_FILE, bpcYamlOutput);
-    console.log(`Generated ${BPC_OUTPUT_FILE} with ${bpcOnlyCleaned.length} rules covering ${bpcDomainCount} domains`);
+    fs.writeFileSync(EMBED_BPC_OUTPUT_FILE, JSON.stringify(bpcOnlyCleaned));
+    console.log(`Generated ${EMBED_BPC_OUTPUT_FILE} (JSON embed) with ${bpcOnlyCleaned.length} rules covering ${bpcDomainCount} domains`);
 
     // Extract test URLs
     const testUrls = [];

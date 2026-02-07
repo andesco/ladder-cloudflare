@@ -521,7 +521,7 @@ export default {
         return new Response(ruleset, {
           status: 200,
           headers: {
-            'Content-Type': 'text/yaml',
+            'Content-Type': 'application/json; charset=utf-8',
             'Access-Control-Allow-Origin': '*'
           }
         });
