@@ -193,16 +193,6 @@ function mapBPCEntry(entry) {
     rule.clearStorage = true;
   }
 
-  // Local overrides: keep these surgical. Upstream BPC defaults sometimes drift
-  // and grouping can hide a single-domain regression.
-  if (domain === 'ft.com') {
-    headers['user-agent'] = UA_GOOGLEBOT;
-    headers['referer'] = REFERER_GOOGLE;
-    headers['x-forwarded-for'] = '66.249.66.1';
-    hasHeaders = true;
-    rule.headers = headers;
-  }
-
   return rule;
 }
 
