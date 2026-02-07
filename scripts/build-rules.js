@@ -193,6 +193,16 @@ function mapBPCEntry(entry) {
     rule.clearStorage = true;
   }
 
+  // Local overrides: keep these surgical. Upstream BPC defaults sometimes drift
+  // and grouping can hide a single-domain regression.
+  if (domain === 'ft.com') {
+    headers['user-agent'] = UA_GOOGLEBOT;
+    headers['referer'] = REFERER_GOOGLE;
+    headers['x-forwarded-for'] = '66.249.66.1';
+    hasHeaders = true;
+    rule.headers = headers;
+  }
+
   return rule;
 }
 
@@ -225,8 +235,19 @@ function ruleGroupKey(rule) {
   const copy = { ...rule };
   delete copy.domain;
   delete copy.domains;
-  // Sort keys for stable comparison
-  return JSON.stringify(copy, Object.keys(copy).sort());
+  // IMPORTANT: We need a *deep* stable stringify here. Passing a "replacer array"
+  // to JSON.stringify applies recursively and would drop nested keys (e.g. headers),
+  // causing unrelated rules to be grouped together.
+  const stable = (value) => {
+    if (Array.isArray(value)) return value.map(stable);
+    if (value && typeof value === 'object') {
+      const out = {};
+      for (const k of Object.keys(value).sort()) out[k] = stable(value[k]);
+      return out;
+    }
+    return value;
+  };
+  return JSON.stringify(stable(copy));
 }
 
 // Re-group: domains with identical non-domain properties → single rule with domains: [...]
@@ -287,7 +308,9 @@ function regroupRules(rules) {
 
 // Merge BPC rule with Ladder rule: BPC provides headers/blocking, Ladder provides injections/tests/regexRules
 function mergeRules(bpcRule, ladderRule) {
-  const merged = { ...bpcRule };
+  // Deep-clone because we mutate nested objects like `headers` and `urlMods`.
+  // A shallow copy would leak Ladder changes back into the BPC-only ruleset.
+  const merged = JSON.parse(JSON.stringify(bpcRule));
 
   // Keep Ladder injections
   if (ladderRule.injections) {
