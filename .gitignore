@@ -7,6 +7,9 @@ yarn-error.log*
 .pnp.js
 .pnp.cjs
 ladder/
+# macOS Alias files accidentally added in early commits
+ladder
+bypass-paywalls-chrome-clean-master
 
 # Cloudflare
 .wrangler/
