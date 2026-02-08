@@ -22,6 +22,112 @@ const REFERER_GOOGLE = 'https://www.google.com/';
 const REFERER_FACEBOOK = 'https://www.facebook.com/';
 const REFERER_TWITTER = 'https://t.co/x?amp=1';
 
+// BPC fields like `useragent`, `referer`, and `random_ip` behave like enums in
+// `sites_aggregated.json`. If upstream adds new values, we want a loud failure
+// instead of silently generating degraded rules.
+const KNOWN_BPC_USERAGENTS = new Set(['googlebot', 'bingbot', 'facebookbot']);
+const KNOWN_BPC_REFERER_TOKENS = new Set(['google', 'facebook', 'twitter']);
+
+function looksLikeURL(value) {
+  return typeof value === 'string' && /^https?:\/\//i.test(value);
+}
+
+function validateBPCData(bpcData) {
+  const unknown = {
+    useragent: new Map(),   // value -> Set(domains)
+    referer: new Map(),     // value -> Set(domains)
+    random_ip: new Map(),   // value -> Set(domains)
+    types: new Map(),       // description -> Set(domains)
+  };
+
+  function record(map, key, domain) {
+    const k = String(key);
+    if (!map.has(k)) map.set(k, new Set());
+    const set = map.get(k);
+    if (set.size < 5) set.add(domain);
+  }
+
+  function checkEntry(entry, domain, ctxLabel) {
+    if (!domain || domain.startsWith('###') || domain.startsWith('#')) return;
+
+    if (entry.useragent) {
+      if (typeof entry.useragent !== 'string') {
+        record(unknown.types, `useragent type=${typeof entry.useragent} (${ctxLabel})`, domain);
+      } else if (!KNOWN_BPC_USERAGENTS.has(entry.useragent)) {
+        record(unknown.useragent, entry.useragent, domain);
+      }
+    }
+
+    if (entry.referer) {
+      if (typeof entry.referer !== 'string') {
+        record(unknown.types, `referer type=${typeof entry.referer} (${ctxLabel})`, domain);
+      } else if (!KNOWN_BPC_REFERER_TOKENS.has(entry.referer) && !looksLikeURL(entry.referer)) {
+        record(unknown.referer, entry.referer, domain);
+      }
+    }
+
+    if (entry.random_ip) {
+      // Allow: "eu" (special), true/"true" (generic random)
+      const v = entry.random_ip;
+      const ok = v === 'eu' || v === true || v === 'true';
+      if (!ok) record(unknown.random_ip, v, domain);
+    }
+  }
+
+  for (const entry of bpcData) {
+    checkEntry(entry, entry.domain, 'root');
+
+    if (!entry.exception || !Array.isArray(entry.exception)) continue;
+    for (const exc of entry.exception) {
+      const excDomains = Array.isArray(exc.domain) ? exc.domain : [exc.domain];
+      for (const d of excDomains) {
+        checkEntry(exc, d, 'exception');
+      }
+    }
+  }
+
+  const lines = [];
+  if (unknown.useragent.size > 0) {
+    lines.push(`- Unknown BPC useragent values: ${[...unknown.useragent.keys()].sort().join(', ')}`);
+  }
+  if (unknown.referer.size > 0) {
+    lines.push(`- Unknown BPC referer values (non-URL): ${[...unknown.referer.keys()].sort().join(', ')}`);
+  }
+  if (unknown.random_ip.size > 0) {
+    lines.push(`- Unknown BPC random_ip values: ${[...unknown.random_ip.keys()].sort().join(', ')}`);
+  }
+  if (unknown.types.size > 0) {
+    lines.push(`- Unexpected BPC field types: ${[...unknown.types.keys()].sort().join(', ')}`);
+  }
+
+  if (lines.length === 0) return;
+
+  // Include a few example domains for debugging. Keep it short so CI logs are usable.
+  const examples = [];
+  for (const [val, domains] of unknown.useragent.entries()) {
+    examples.push(`  useragent=${val}: ${[...domains].join(', ')}`);
+  }
+  for (const [val, domains] of unknown.referer.entries()) {
+    examples.push(`  referer=${val}: ${[...domains].join(', ')}`);
+  }
+  for (const [val, domains] of unknown.random_ip.entries()) {
+    examples.push(`  random_ip=${val}: ${[...domains].join(', ')}`);
+  }
+  for (const [val, domains] of unknown.types.entries()) {
+    examples.push(`  ${val}: ${[...domains].join(', ')}`);
+  }
+
+  throw new Error(
+    [
+      'Unknown/unsupported BPC tokens detected in sites_aggregated.json (failing build).',
+      ...lines,
+      '',
+      'Examples:',
+      ...examples.slice(0, 30),
+    ].join('\n'),
+  );
+}
+
 async function fetchBPC() {
   console.log('Fetching BPC data from:', BPC_URL);
   const resp = await fetch(BPC_URL);
@@ -76,6 +182,8 @@ function mapBPCEntry(entry) {
       case 'facebookbot':
         headers['user-agent'] = UA_FACEBOOKBOT;
         break;
+      default:
+        throw new Error(`Unknown BPC useragent token '${entry.useragent}' for domain '${domain}'`);
     }
     hasHeaders = true;
   }
@@ -98,7 +206,11 @@ function mapBPCEntry(entry) {
         headers['referer'] = REFERER_TWITTER;
         break;
       default:
-        headers['referer'] = entry.referer;
+        if (looksLikeURL(entry.referer)) {
+          headers['referer'] = entry.referer;
+        } else {
+          throw new Error(`Unknown BPC referer token '${entry.referer}' for domain '${domain}'`);
+        }
     }
     hasHeaders = true;
   }
@@ -130,7 +242,13 @@ function mapBPCEntry(entry) {
 
   // #5: Random IP
   if (entry.random_ip) {
-    rule.randomIP = entry.random_ip === 'eu' ? 'eu' : 'true';
+    if (entry.random_ip === 'eu') {
+      rule.randomIP = 'eu';
+    } else if (entry.random_ip === true || entry.random_ip === 'true') {
+      rule.randomIP = 'true';
+    } else {
+      throw new Error(`Unknown BPC random_ip value '${entry.random_ip}' for domain '${domain}'`);
+    }
   }
 
   // #7: Block regex (script blocking)
@@ -412,6 +530,7 @@ async function main() {
     // Step 1: Fetch BPC data
     const bpcData = await fetchBPC();
     console.log(`Fetched ${bpcData.length} BPC entries`);
+    validateBPCData(bpcData);
 
     // Step 2: Load Ladder rules
     const ladderRules = loadLadderRules();

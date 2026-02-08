@@ -87,6 +87,8 @@ Ladderflare does not support these legacy variables:
 
 See example rules and the canonical Ladder rules in [`everywall/ladder-rules`][ladder-rules]. This repo embeds generated JSON rulesets during build (not committed).
 
+For the Ladderflare-specific embedded ruleset schema, reserved values, and runtime semantics, see [`RULESET-SPEC.md`](RULESET-SPEC.md).
+
 ## Development
 
 ### How It Works
