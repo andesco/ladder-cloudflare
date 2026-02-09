@@ -4,7 +4,9 @@ const fs = require('fs');
 const path = require('path');
 const yaml = require('yaml');
 
-const BPC_URL = 'https://bypass.andrewe.dev/sites_aggregated.json';
+// BPC data is loaded from a local repo copy (sites_aggregated.js) so builds are reproducible
+// and do not depend on network access.
+const BPC_FILE = 'sites_aggregated.js';
 const LADDER_FILE = 'ruleset-ladder.yaml';
 // Faster-to-parse rulesets for WASM embedding (JSON). We do not generate YAML copies.
 const EMBED_OUTPUT_FILE = 'ruleset-embedded.json';
@@ -12,127 +14,20 @@ const EMBED_BPC_OUTPUT_FILE = 'ruleset-bpc-embedded.json';
 const EMBED_LADDER_OUTPUT_FILE = 'ruleset-ladder-embedded.json';
 const TEST_URLS_FILE = 'test-urls.json';
 
-// Known user-agent strings
-const UA_GOOGLEBOT = 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
-const UA_BINGBOT = 'Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)';
-const UA_FACEBOOKBOT = 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)';
-
-// Known referer URLs
-const REFERER_GOOGLE = 'https://www.google.com/';
-const REFERER_FACEBOOK = 'https://www.facebook.com/';
-const REFERER_TWITTER = 'https://t.co/x?amp=1';
-
-// BPC fields like `useragent`, `referer`, and `random_ip` behave like enums in
-// `sites_aggregated.json`. If upstream adds new values, we want a loud failure
-// instead of silently generating degraded rules.
-const KNOWN_BPC_USERAGENTS = new Set(['googlebot', 'bingbot', 'facebookbot']);
-const KNOWN_BPC_REFERER_TOKENS = new Set(['google', 'facebook', 'twitter']);
-
-function looksLikeURL(value) {
-  return typeof value === 'string' && /^https?:\/\//i.test(value);
+let bpcMapper = null;
+async function loadBpcMapper() {
+  if (bpcMapper) return bpcMapper;
+  // Use dynamic import so this script can stay CommonJS (Node >=16).
+  bpcMapper = await import('./bpc-mapper.mjs');
+  return bpcMapper;
 }
 
-function validateBPCData(bpcData) {
-  const unknown = {
-    useragent: new Map(),   // value -> Set(domains)
-    referer: new Map(),     // value -> Set(domains)
-    random_ip: new Map(),   // value -> Set(domains)
-    types: new Map(),       // description -> Set(domains)
-  };
-
-  function record(map, key, domain) {
-    const k = String(key);
-    if (!map.has(k)) map.set(k, new Set());
-    const set = map.get(k);
-    if (set.size < 5) set.add(domain);
+function loadLocalBPC() {
+  const bpcPath = path.resolve(BPC_FILE);
+  if (!fs.existsSync(bpcPath)) {
+    throw new Error(`Missing local BPC file '${BPC_FILE}' (expected at ${bpcPath})`);
   }
-
-  function checkEntry(entry, domain, ctxLabel) {
-    if (!domain || domain.startsWith('###') || domain.startsWith('#')) return;
-
-    if (entry.useragent) {
-      if (typeof entry.useragent !== 'string') {
-        record(unknown.types, `useragent type=${typeof entry.useragent} (${ctxLabel})`, domain);
-      } else if (!KNOWN_BPC_USERAGENTS.has(entry.useragent)) {
-        record(unknown.useragent, entry.useragent, domain);
-      }
-    }
-
-    if (entry.referer) {
-      if (typeof entry.referer !== 'string') {
-        record(unknown.types, `referer type=${typeof entry.referer} (${ctxLabel})`, domain);
-      } else if (!KNOWN_BPC_REFERER_TOKENS.has(entry.referer) && !looksLikeURL(entry.referer)) {
-        record(unknown.referer, entry.referer, domain);
-      }
-    }
-
-    if (entry.random_ip) {
-      // Allow: "eu" (special), true/"true" (generic random)
-      const v = entry.random_ip;
-      const ok = v === 'eu' || v === true || v === 'true';
-      if (!ok) record(unknown.random_ip, v, domain);
-    }
-  }
-
-  for (const entry of bpcData) {
-    checkEntry(entry, entry.domain, 'root');
-
-    if (!entry.exception || !Array.isArray(entry.exception)) continue;
-    for (const exc of entry.exception) {
-      const excDomains = Array.isArray(exc.domain) ? exc.domain : [exc.domain];
-      for (const d of excDomains) {
-        checkEntry(exc, d, 'exception');
-      }
-    }
-  }
-
-  const lines = [];
-  if (unknown.useragent.size > 0) {
-    lines.push(`- Unknown BPC useragent values: ${[...unknown.useragent.keys()].sort().join(', ')}`);
-  }
-  if (unknown.referer.size > 0) {
-    lines.push(`- Unknown BPC referer values (non-URL): ${[...unknown.referer.keys()].sort().join(', ')}`);
-  }
-  if (unknown.random_ip.size > 0) {
-    lines.push(`- Unknown BPC random_ip values: ${[...unknown.random_ip.keys()].sort().join(', ')}`);
-  }
-  if (unknown.types.size > 0) {
-    lines.push(`- Unexpected BPC field types: ${[...unknown.types.keys()].sort().join(', ')}`);
-  }
-
-  if (lines.length === 0) return;
-
-  // Include a few example domains for debugging. Keep it short so CI logs are usable.
-  const examples = [];
-  for (const [val, domains] of unknown.useragent.entries()) {
-    examples.push(`  useragent=${val}: ${[...domains].join(', ')}`);
-  }
-  for (const [val, domains] of unknown.referer.entries()) {
-    examples.push(`  referer=${val}: ${[...domains].join(', ')}`);
-  }
-  for (const [val, domains] of unknown.random_ip.entries()) {
-    examples.push(`  random_ip=${val}: ${[...domains].join(', ')}`);
-  }
-  for (const [val, domains] of unknown.types.entries()) {
-    examples.push(`  ${val}: ${[...domains].join(', ')}`);
-  }
-
-  throw new Error(
-    [
-      'Unknown/unsupported BPC tokens detected in sites_aggregated.json (failing build).',
-      ...lines,
-      '',
-      'Examples:',
-      ...examples.slice(0, 30),
-    ].join('\n'),
-  );
-}
-
-async function fetchBPC() {
-  console.log('Fetching BPC data from:', BPC_URL);
-  const resp = await fetch(BPC_URL);
-  if (!resp.ok) throw new Error(`Failed to fetch BPC: ${resp.status}`);
-  return resp.json();
+  return fs.readFileSync(bpcPath, 'utf-8');
 }
 
 function loadLadderRules() {
@@ -159,378 +54,15 @@ function indexLadderRules(ladderRules) {
   return index;
 }
 
-// Map a single BPC entry to a Ladderflare rule object
-function mapBPCEntry(entry) {
-  const domain = entry.domain;
-  if (!domain || domain.startsWith('###') || domain.startsWith('#')) return null;
-
-  const rule = { domain };
-  const headers = {};
-  let hasHeaders = false;
-
-  // #3: User-agent mapping
-  if (entry.useragent) {
-    switch (entry.useragent) {
-      case 'googlebot':
-        headers['user-agent'] = UA_GOOGLEBOT;
-        headers['referer'] = REFERER_GOOGLE;
-        headers['x-forwarded-for'] = '66.249.66.1';
-        break;
-      case 'bingbot':
-        headers['user-agent'] = UA_BINGBOT;
-        break;
-      case 'facebookbot':
-        headers['user-agent'] = UA_FACEBOOKBOT;
-        break;
-      default:
-        throw new Error(`Unknown BPC useragent token '${entry.useragent}' for domain '${domain}'`);
-    }
-    hasHeaders = true;
-  }
-
-  if (entry.useragent_custom) {
-    headers['user-agent'] = entry.useragent_custom;
-    hasHeaders = true;
-  }
-
-  // #4: Referer mapping
-  if (entry.referer) {
-    switch (entry.referer) {
-      case 'google':
-        headers['referer'] = REFERER_GOOGLE;
-        break;
-      case 'facebook':
-        headers['referer'] = REFERER_FACEBOOK;
-        break;
-      case 'twitter':
-        headers['referer'] = REFERER_TWITTER;
-        break;
-      default:
-        if (looksLikeURL(entry.referer)) {
-          headers['referer'] = entry.referer;
-        } else {
-          throw new Error(`Unknown BPC referer token '${entry.referer}' for domain '${domain}'`);
-        }
-    }
-    hasHeaders = true;
-  }
-
-  if (entry.referer_custom) {
-    headers['referer'] = entry.referer_custom;
-    hasHeaders = true;
-  }
-
-  // #6: Custom headers → cookie + extraHeaders
-  if (entry.headers_custom) {
-    const extraHeaders = {};
-    for (const [key, val] of Object.entries(entry.headers_custom)) {
-      if (key.toLowerCase() === 'cookie') {
-        headers['cookie'] = val;
-        hasHeaders = true;
-      } else {
-        extraHeaders[key] = String(val);
-      }
-    }
-    if (Object.keys(extraHeaders).length > 0) {
-      rule.extraHeaders = extraHeaders;
-    }
-  }
-
-  if (hasHeaders) {
-    rule.headers = headers;
-  }
-
-  // #5: Random IP
-  if (entry.random_ip) {
-    if (entry.random_ip === 'eu') {
-      rule.randomIP = 'eu';
-    } else if (entry.random_ip === true || entry.random_ip === 'true') {
-      rule.randomIP = 'true';
-    } else {
-      throw new Error(`Unknown BPC random_ip value '${entry.random_ip}' for domain '${domain}'`);
-    }
-  }
-
-  // #7: Block regex (script blocking)
-  if (entry.block_regex) {
-    const patterns = typeof entry.block_regex === 'string' ? [entry.block_regex] : entry.block_regex;
-    rule.blockScripts = patterns.map(p => p.replace(/\{domain\}/g, domain.replace(/\./g, '\\.')));
-  }
-
-  // #8: Block regex general
-  if (entry.block_regex_general) {
-    const patterns = typeof entry.block_regex_general === 'string' ? [entry.block_regex_general] : entry.block_regex_general;
-    rule.blockScriptsGeneral = patterns.map(p => p.replace(/\{domain\}/g, domain.replace(/\./g, '\\.')));
-  }
-
-  // #9: cs_code (content script operations)
-  if (entry.cs_code) {
-    let ops;
-    if (typeof entry.cs_code === 'string') {
-      try {
-        ops = JSON.parse(entry.cs_code);
-      } catch (e) {
-        console.warn(`Failed to parse cs_code for ${domain}:`, e.message);
-        ops = null;
-      }
-    } else if (Array.isArray(entry.cs_code)) {
-      ops = entry.cs_code;
-    }
-    if (ops && Array.isArray(ops)) {
-      rule.csCode = ops.map(op => {
-        const mapped = {};
-        if (op.cond) mapped.cond = op.cond;
-        if (op.hide_elem) mapped.hide_elem = op.hide_elem;
-        if (op.rm_elem) mapped.rm_elem = true;
-        if (op.rm_class) mapped.rm_class = op.rm_class;
-        if (op.rm_attrib) mapped.rm_attrib = op.rm_attrib;
-        if (op.set_attrib) mapped.set_attrib = op.set_attrib;
-        if (op.add_style) mapped.add_style = op.add_style;
-        return mapped;
-      });
-    }
-  }
-
-  // #10: AMP unhide
-  if (entry.amp_unhide) {
-    rule.ampUnhide = true;
-  }
-
-  // #11: AMP redirect → urlMods query
-  if (entry.amp_redirect) {
-    rule.urlMods = { query: [{ key: 'amp', value: '1' }] };
-  }
-
-  // #12: Block inline JS
-  if (entry.block_js_inline) {
-    rule.blockJsInline = entry.block_js_inline;
-  }
-
-  // #13: Clear local/session storage
-  if (entry.cs_clear_lclstrg) {
-    rule.clearStorage = true;
-  }
-
-  return rule;
-}
-
-// Handle exception arrays: produce separate rules for excepted domains
-function handleExceptions(entry, baseRule) {
-  const exceptionRules = [];
-  if (!entry.exception || !Array.isArray(entry.exception)) return exceptionRules;
-
-  for (const exc of entry.exception) {
-    // Exception domain can be string or array
-    const excDomains = Array.isArray(exc.domain) ? exc.domain : [exc.domain];
-
-    for (const excDomain of excDomains) {
-      if (!excDomain) continue;
-
-      // Map the exception entry as its own BPC entry
-      const excEntry = { ...exc, domain: excDomain };
-      const excRule = mapBPCEntry(excEntry);
-      if (excRule) {
-        exceptionRules.push(excRule);
-      }
-    }
-  }
-
-  return exceptionRules;
-}
-
-// Generate a stable key for grouping rules with identical properties
-function ruleGroupKey(rule) {
-  const copy = { ...rule };
-  delete copy.domain;
-  delete copy.domains;
-  // IMPORTANT: We need a *deep* stable stringify here. Passing a "replacer array"
-  // to JSON.stringify applies recursively and would drop nested keys (e.g. headers),
-  // causing unrelated rules to be grouped together.
-  const stable = (value) => {
-    if (Array.isArray(value)) return value.map(stable);
-    if (value && typeof value === 'object') {
-      const out = {};
-      for (const k of Object.keys(value).sort()) out[k] = stable(value[k]);
-      return out;
-    }
-    return value;
-  };
-  return JSON.stringify(stable(copy));
-}
-
-// Re-group: domains with identical non-domain properties → single rule with domains: [...]
-// Rules with injections, tests, or regexRules are NOT grouped (they're unique per domain)
-function regroupRules(rules) {
-  const groups = new Map();
-  const ungroupable = [];
-
-  for (const rule of rules) {
-    // Don't group rules that have domain-specific content
-    const hasUniqueContent = (rule.injections && rule.injections.length > 0) ||
-                              (rule.tests && (Array.isArray(rule.tests) ? rule.tests.length > 0 : !!rule.tests)) ||
-                              (rule.regexRules && rule.regexRules.length > 0) ||
-                              (rule.paths && rule.paths.length > 0);
-
-    if (hasUniqueContent) {
-      ungroupable.push(rule);
-      continue;
-    }
-
-    const key = ruleGroupKey(rule);
-    // Collect all domains from both domain and domains fields
-    const ruleDomains = [];
-    if (rule.domain) ruleDomains.push(rule.domain);
-    if (rule.domains) ruleDomains.push(...rule.domains);
-
-    if (!groups.has(key)) {
-      groups.set(key, { ...rule, _domains: [...ruleDomains] });
-    } else {
-      groups.get(key)._domains.push(...ruleDomains);
-    }
-  }
-
-  const result = [];
-
-  // Add grouped rules
-  for (const group of groups.values()) {
-    const domains = group._domains.filter(Boolean);
-    delete group._domains;
-    delete group.domain;
-    delete group.domains;
-
-    if (domains.length === 1) {
-      group.domain = domains[0];
-    } else {
-      group.domains = domains.sort();
-    }
-    result.push(group);
-  }
-
-  // Add ungroupable rules as-is
-  for (const rule of ungroupable) {
-    result.push(rule);
-  }
-
-  return result;
-}
-
-// Merge BPC rule with Ladder rule: BPC provides headers/blocking, Ladder provides injections/tests/regexRules
-function mergeRules(bpcRule, ladderRule) {
-  // Deep-clone because we mutate nested objects like `headers` and `urlMods`.
-  // A shallow copy would leak Ladder changes back into the BPC-only ruleset.
-  const merged = JSON.parse(JSON.stringify(bpcRule));
-
-  // Keep Ladder injections
-  if (ladderRule.injections) {
-    merged.injections = ladderRule.injections;
-  }
-
-  // Keep Ladder tests
-  if (ladderRule.tests) {
-    merged.tests = ladderRule.tests;
-  }
-
-  // Keep Ladder regexRules
-  if (ladderRule.regexRules) {
-    merged.regexRules = ladderRule.regexRules;
-  }
-
-  // Keep Ladder paths
-  if (ladderRule.paths) {
-    merged.paths = ladderRule.paths;
-  }
-
-  // Keep Ladder urlMods (unless BPC also has them, then merge)
-  if (ladderRule.urlMods) {
-    if (merged.urlMods) {
-      // Merge: BPC query + Ladder query etc
-      merged.urlMods = {
-        domain: [...(merged.urlMods.domain || []), ...(ladderRule.urlMods.domain || [])],
-        path: [...(merged.urlMods.path || []), ...(ladderRule.urlMods.path || [])],
-        query: [...(merged.urlMods.query || []), ...(ladderRule.urlMods.query || [])],
-      };
-      // Clean up empty arrays
-      if (merged.urlMods.domain.length === 0) delete merged.urlMods.domain;
-      if (merged.urlMods.path.length === 0) delete merged.urlMods.path;
-      if (merged.urlMods.query.length === 0) delete merged.urlMods.query;
-    } else {
-      merged.urlMods = ladderRule.urlMods;
-    }
-  }
-
-  // Merge headers: BPC headers take precedence, Ladder headers fill gaps
-  if (ladderRule.headers) {
-    merged.headers = merged.headers || {};
-    for (const [key, val] of Object.entries(ladderRule.headers)) {
-      if (!merged.headers[key]) {
-        merged.headers[key] = val;
-      }
-    }
-  }
-
-  // Keep Ladder googleCache
-  if (ladderRule.googleCache) {
-    merged.googleCache = ladderRule.googleCache;
-  }
-
-  return merged;
-}
-
-// Clean up a rule for YAML output (remove empty/falsy fields)
-function cleanRule(rule) {
-  const cleaned = {};
-
-  // Domain fields first
-  if (rule.domain) cleaned.domain = rule.domain;
-  if (rule.domains && rule.domains.length > 0) cleaned.domains = rule.domains;
-  if (rule.paths && rule.paths.length > 0) cleaned.paths = rule.paths;
-
-  // Headers
-  if (rule.headers && Object.keys(rule.headers).length > 0) cleaned.headers = rule.headers;
-
-  // URL mods
-  if (rule.urlMods) cleaned.urlMods = rule.urlMods;
-
-  // Google Cache
-  if (rule.googleCache) cleaned.googleCache = rule.googleCache;
-
-  // Extra headers
-  if (rule.extraHeaders && Object.keys(rule.extraHeaders).length > 0) cleaned.extraHeaders = rule.extraHeaders;
-
-  // New BPC fields
-  if (rule.randomIP) cleaned.randomIP = rule.randomIP;
-  if (rule.blockScripts && rule.blockScripts.length > 0) cleaned.blockScripts = rule.blockScripts;
-  if (rule.blockScriptsGeneral && rule.blockScriptsGeneral.length > 0) cleaned.blockScriptsGeneral = rule.blockScriptsGeneral;
-  if (rule.csCode && rule.csCode.length > 0) cleaned.csCode = rule.csCode;
-  if (rule.ampUnhide) cleaned.ampUnhide = rule.ampUnhide;
-  if (rule.blockJsInline) cleaned.blockJsInline = rule.blockJsInline;
-  if (rule.clearStorage) cleaned.clearStorage = rule.clearStorage;
-  if (rule.pathExclusions && rule.pathExclusions.length > 0) cleaned.pathExclusions = rule.pathExclusions;
-
-  // Regex rules
-  if (rule.regexRules && rule.regexRules.length > 0) cleaned.regexRules = rule.regexRules;
-
-  // Injections
-  if (rule.injections && rule.injections.length > 0) cleaned.injections = rule.injections;
-
-  // Tests
-  if (rule.tests) {
-    if (Array.isArray(rule.tests) && rule.tests.length > 0) {
-      cleaned.tests = rule.tests;
-    } else if (!Array.isArray(rule.tests) && rule.tests.url) {
-      cleaned.tests = [rule.tests];
-    }
-  }
-
-  return cleaned;
-}
-
 async function main() {
   try {
-    // Step 1: Fetch BPC data
-    const bpcData = await fetchBPC();
-    console.log(`Fetched ${bpcData.length} BPC entries`);
-    validateBPCData(bpcData);
+    const mapper = await loadBpcMapper();
+
+    // Step 1: Load local BPC data
+    const bpcText = loadLocalBPC();
+    const bpcData = mapper.parseSitesAggregatedText(bpcText);
+    console.log(`Loaded ${bpcData.length} BPC entries from ${BPC_FILE}`);
+    mapper.validateBPCData(bpcData);
 
     // Step 2: Load Ladder rules
     const ladderRules = loadLadderRules();
@@ -544,14 +76,14 @@ async function main() {
     const seenDomains = new Set();
 
     for (const entry of bpcData) {
-      const rule = mapBPCEntry(entry);
+      const rule = mapper.mapBPCEntry(entry);
       if (!rule) continue;
 
       bpcRules.push(rule);
       seenDomains.add(rule.domain);
 
       // Handle exceptions (#18)
-      const excRules = handleExceptions(entry, rule);
+      const excRules = mapper.handleExceptions(entry, rule);
       for (const excRule of excRules) {
         bpcRules.push(excRule);
         seenDomains.add(excRule.domain);
@@ -569,7 +101,7 @@ async function main() {
       const ladderRule = ladderIndex[domain];
 
       if (ladderRule) {
-        mergedRules.push(mergeRules(bpcRule, ladderRule));
+        mergedRules.push(mapper.mergeRules(bpcRule, ladderRule));
         ladderDomainsUsed.add(domain);
         // Mark all domains in the Ladder rule as used
         if (ladderRule.domains) {
@@ -594,10 +126,10 @@ async function main() {
     }
 
     // Step 6: Re-group identical rules (#17)
-    const groupedRules = regroupRules(mergedRules);
+    const groupedRules = mapper.regroupRules(mergedRules);
 
     // Step 7: Clean and output
-    const cleanedRules = groupedRules.map(cleanRule);
+    const cleanedRules = groupedRules.map(mapper.cleanRule);
 
     // Count domains
     let domainCount = 0;
@@ -610,8 +142,8 @@ async function main() {
     console.log(`Generated ${EMBED_OUTPUT_FILE} (JSON embed) with ${cleanedRules.length} rules covering ${domainCount} domains`);
 
     // Generate BPC-only ruleset (without Ladder merge)
-    const bpcOnlyGrouped = regroupRules(bpcRules);
-    const bpcOnlyCleaned = bpcOnlyGrouped.map(cleanRule);
+    const bpcOnlyGrouped = mapper.regroupRules(bpcRules);
+    const bpcOnlyCleaned = bpcOnlyGrouped.map(mapper.cleanRule);
 
     // Count domains in BPC-only ruleset
     let bpcDomainCount = 0;

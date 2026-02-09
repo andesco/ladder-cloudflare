@@ -1,10 +1,45 @@
-# Ladderflare Ruleset Spec (Embedded JSON)
+# Ladderflare Ruleset Spec
 
 Ladderflare is a rules-driven proxy. The **ruleset is data** (YAML/JSON) and the Go WASM runtime acts as the rules engine.
 
+## End-to-End Lifecycle: Request → Response
+
+At a high level, Ladderflare does the same thing for every URL:
+
+1. **Select a ruleset mode**
+   - Default is `merged` (BPC + Ladder overlaid).
+   - `json` is BPC-only; `yaml` is Ladder-only. (These correspond to the embedded ruleset files described below.)
+2. **Match rules**
+   - A rule matches a request by `host` (exact match or suffix match), and optionally by `paths` and `pathExclusions`.
+   - In `merged` mode, Ladderflare selects a matching BPC rule and a matching Ladder rule independently (same host/path), then overlays them into one effective rule (see "Merged Mode Layering").
+3. **Compute fetch instructions**
+   - Apply any URL rewrites (`urlMods` / `googleCache`).
+   - Build request headers from rule overrides or defaults (`User-Agent`, `Referer`, `X-Forwarded-For`, `Cookie`, `extraHeaders`, `randomIP`).
+4. **Fetch origin**
+   - The Cloudflare Worker performs `fetch()` using the computed URL + headers.
+5. **Process the response (HTML only)**
+   - Non-HTML assets (JS/CSS/images/fonts/etc) are returned without DOM processing to avoid corrupting payloads.
+   - For HTML, Ladderflare applies rule-driven transformations in this order:
+     1) `regexRules` (string regex replace, before parsing)
+     2) script/style blocking (`blockScripts`, `blockScriptsGeneral`, plus global block lists)
+     3) inline script blocking (`blockJsInline`)
+     4) DOM ops (`csCode`)
+     5) `ampUnhide`
+     6) rewrite relative URLs to proxied `/https://host/...` URLs
+     7) `injections`
+     8) `clearStorage` (inject script to clear local/session storage)
+   - If the rule specifies `headers.content-security-policy`, the Worker overrides the response `Content-Security-Policy` header.
+
+Implementation pointers (source of truth):
+
+- Rule selection + merging: `findRuleForDomainAndPathWithMode`, `findRuleForDomainAndPathInRuleset`, `mergeRuleOverlay` in `main.go`
+- Fetch instruction generation: `fetchURL` and `applyURLModifications` in `main.go`
+- Response processing pipeline: `processContent` in `main.go`
+- Worker fetch/HTML-gating/CSP override: `fetchProxiedContent` in `index.js`
+
 At build time, `scripts/build-rules.js` generates embedded JSON rulesets from:
 
-- BPC aggregated rules: `https://bypass.andrewe.dev/sites_aggregated.json`
+- BPC aggregated rules: local `sites_aggregated.js` (repo copy; no build-time network fetch)
 - Local Ladder rules: `ruleset-ladder.yaml`
 
 Outputs written into the repo root:
@@ -67,7 +102,7 @@ Implemented in `main.go` (`findRuleForDomainAndPathInRuleset`):
 4. **First match wins**:
    - Rules are scanned in order; the first matching rule is used
 
-## Merged Mode Layering (Default Route)
+## Merged Mode Layering: Default Route
 
 Merged mode selects a BPC rule and a Ladder rule **independently** (same host/path), then overlays them (`mergeRuleOverlay`):
 
@@ -78,7 +113,7 @@ Merged mode selects a BPC rule and a Ladder rule **independently** (same host/pa
 
 This layering exists to avoid “parent domain shadows subdomain” problems (e.g. BPC matches `nytimes.com` while Ladder targets `www.nytimes.com`).
 
-## Request Behavior (Headers + URL Rewrites)
+## Request Behavior: Headers + URL Rewrites
 
 Request behavior is computed in WASM (`fetchURL`) and applied in the Worker (`index.js`):
 
@@ -106,7 +141,7 @@ Request behavior is computed in WASM (`fetchURL`) and applied in the Worker (`in
 - `googleCache: true` rewrites the fetch URL to:
   - `https://webcache.googleusercontent.com/search?q=cache:{url}`
 
-## Response Behavior (HTML + DOM Modifications)
+## Response Behavior: HTML + DOM Modifications
 
 Implemented in `processContent`:
 
@@ -123,12 +158,12 @@ Implemented in `processContent`:
 
 If `headers.content-security-policy` is set, it is returned to the Worker so the response CSP can be overridden.
 
-## Reserved Values / Gotchas
+## Be Careful with Reserved Values
 
 - `headers.referer: "none"` and `headers.x-forwarded-for: "none"` are reserved sentinels meaning “do not send this header”.
 - In `urlMods.query`, `value: ""` deletes the query key; you cannot set an empty-string query param value with this scheme.
 - Parent-domain matching is a feature; merged mode layering exists to avoid it causing rule shadowing.
 
-## Build-Time Guardrails (Fail Fast)
+## Build-Time Guardrails to Fail Fast
 
 `scripts/build-rules.js` treats some BPC fields as enums (`useragent`, `referer`, `random_ip`). If upstream adds new token values, Ladderflare fails the build so changes are intentional (update mapping + the allowlist) instead of silently degrading.

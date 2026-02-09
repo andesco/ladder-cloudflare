@@ -7,6 +7,12 @@ import wasm from './public/main.wasm';
 // Load the Go WASM runtime
 import './public/wasm_exec.js';
 
+import {
+  parseSitesAggregatedText,
+  validateBPCData,
+  buildBpcOnlyRuleset,
+} from './scripts/bpc-mapper.mjs';
+
 // Static assets mapping
 const STATIC_ASSETS = {
   '/': 'index.html',
@@ -29,6 +35,17 @@ const MIME_TYPES = {
 // Global WASM instance
 let wasmInstance = null;
 let goInstance = null;
+
+// Optional KV-backed BPC ruleset loading.
+// KV binding is optional: when not configured, embedded BPC ruleset is used.
+const BPC_KV_VERSION_KEY = 'bpc:ruleset_bpc:version';
+const BPC_KV_RULESET_KEY = 'bpc:ruleset_bpc';
+const BPC_KV_SITES_JS_KEY = 'bpc:sites_aggregated_js';
+const BPC_KV_SITES_VERSION_KEY = 'bpc:sites_aggregated_js:version';
+const BPC_KV_MANIFEST_KEY = 'bpc:manifest';
+const BPC_RUNTIME_REFRESH_MS = 60 * 1000; // isolate-level refresh throttle
+let bpcLoadedVersion = null;
+let bpcLastRefreshAt = 0;
 
 // Polyfills for Cloudflare Workers environment
 function setupPolyfills() {
@@ -81,6 +98,98 @@ async function initWasm(env) {
 
   console.log('Ladderflare WASM initialized');
   return instance;
+}
+
+async function maybeLoadBpcRulesetFromKV(env, { force = false } = {}) {
+  const kv = env?.CONFIG_KV;
+  if (!kv) return false;
+
+  const now = Date.now();
+  if (!force && now - bpcLastRefreshAt < BPC_RUNTIME_REFRESH_MS) return false;
+  bpcLastRefreshAt = now;
+
+  const nextVersion = await kv.get(BPC_KV_VERSION_KEY);
+  if (!nextVersion || nextVersion === bpcLoadedVersion) return false;
+
+  const rulesJSON = await kv.get(BPC_KV_RULESET_KEY);
+  if (!rulesJSON) return false;
+
+  // WASM initializes globalThis.setBPCRuleset at startup.
+  if (typeof globalThis.setBPCRuleset !== 'function') return false;
+
+  const res = globalThis.setBPCRuleset(rulesJSON);
+  if (res !== true) {
+    console.error('Failed to set BPC ruleset in WASM:', res);
+    return false;
+  }
+
+  bpcLoadedVersion = nextVersion;
+  console.log('Loaded BPC ruleset from KV version:', bpcLoadedVersion);
+  return true;
+}
+
+async function updateBpcFromManifest(env) {
+  const kv = env?.CONFIG_KV;
+  const manifestURL = env?.RULESET_URL;
+  if (!kv || !manifestURL) return;
+
+  let manifest;
+  try {
+    const resp = await fetch(manifestURL, { cf: { cacheTtl: 0, cacheEverything: false } });
+    if (!resp.ok) throw new Error(`manifest fetch failed: ${resp.status}`);
+    manifest = await resp.json();
+  } catch (err) {
+    console.error('BPC update: failed to fetch/parse manifest:', err?.message || String(err));
+    return;
+  }
+
+  const entry = manifest?.sites_aggregated_js;
+  const nextVersion = entry?.version;
+  const sitesURL = entry?.url;
+  if (!nextVersion || !sitesURL) {
+    console.error('BPC update: manifest missing sites_aggregated_js.version/url');
+    return;
+  }
+
+  const currentVersion = await kv.get(BPC_KV_SITES_VERSION_KEY);
+  if (currentVersion === nextVersion) return;
+
+  let sitesText;
+  try {
+    const resp = await fetch(sitesURL, { cf: { cacheTtl: 0, cacheEverything: false } });
+    if (!resp.ok) throw new Error(`sites_aggregated.js fetch failed: ${resp.status}`);
+    sitesText = await resp.text();
+  } catch (err) {
+    console.error('BPC update: failed to fetch sites_aggregated.js:', err?.message || String(err));
+    return;
+  }
+
+  let bpcData;
+  try {
+    bpcData = parseSitesAggregatedText(sitesText);
+    validateBPCData(bpcData);
+  } catch (err) {
+    console.error('BPC update: refusing to update due to parse/validate failure:', err?.message || String(err));
+    return;
+  }
+
+  let rulesetBpc;
+  try {
+    rulesetBpc = buildBpcOnlyRuleset(bpcData);
+  } catch (err) {
+    console.error('BPC update: failed to map BPC data to ruleset:', err?.message || String(err));
+    return;
+  }
+
+  const rulesetJSON = JSON.stringify(rulesetBpc);
+
+  await kv.put(BPC_KV_SITES_JS_KEY, sitesText);
+  await kv.put(BPC_KV_SITES_VERSION_KEY, nextVersion);
+  await kv.put(BPC_KV_RULESET_KEY, rulesetJSON);
+  await kv.put(BPC_KV_VERSION_KEY, nextVersion);
+  await kv.put(BPC_KV_MANIFEST_KEY, JSON.stringify(manifest));
+
+  console.log('BPC update: stored sites_aggregated.js + mapped ruleset in KV version:', nextVersion);
 }
 
 /**
@@ -525,6 +634,10 @@ export default {
         await new Promise(resolve => setTimeout(resolve, 100));
       }
 
+      // If KV is configured and has a newer BPC ruleset, load it into WASM.
+      // This is isolate-cached and throttled so it doesn't KV-read on every request.
+      await maybeLoadBpcRulesetFromKV(env);
+
       const url = new URL(request.url);
       const pathname = url.pathname;
       const pathWithQuery = pathname + url.search;
@@ -695,5 +808,11 @@ export default {
         }
       });
     }
+  }
+  ,
+
+  async scheduled(event, env, ctx) {
+    // KV is optional. If not configured (or RULESET_URL not set), this is a no-op.
+    ctx.waitUntil(updateBpcFromManifest(env));
   }
 };

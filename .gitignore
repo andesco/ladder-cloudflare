@@ -6,10 +6,6 @@ yarn-error.log*
 .pnp/
 .pnp.js
 .pnp.cjs
-ladder/
-# macOS Alias files accidentally added in early commits
-ladder
-bypass-paywalls-chrome-clean-master
 
 # Cloudflare
 .wrangler/
@@ -32,10 +28,11 @@ wrangler.local.toml
 *.swo
 .DS_Store
 .claude/
+AGENT.md
 CLAUDE.md
 GEMINI.md
 
-# Alias files
+# Alias
 .aliases
 .bash_aliases
 .zsh_aliases
@@ -57,7 +54,8 @@ public/wasm_exec.js
 # Build scratch/output
 .tmp_bpc/
 test-urls.json
+test-urls.txt
 output/
 
-# macOS Finder alias (local convenience, not source)
-bypass-manifest-cloudflare
+# Local BPC input (kept out of git; required for build:rules)
+sites_aggregated.js

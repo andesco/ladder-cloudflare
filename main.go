@@ -129,6 +129,7 @@ func main() {
 	var getRulesetDomainsFunc = js.FuncOf(getRulesetDomains)
 	var fetchURLFunc = js.FuncOf(fetchURL)
 	var processContentFunc = js.FuncOf(processContent)
+	var setBPCRulesetFunc = js.FuncOf(setBPCRuleset)
 
 	// Register JavaScript functions for Cloudflare Worker
 	js.Global().Set("handleRequest", handleRequestFunc)
@@ -136,6 +137,7 @@ func main() {
 	js.Global().Set("getRulesetDomains", getRulesetDomainsFunc)
 	js.Global().Set("fetchURL", fetchURLFunc)
 	js.Global().Set("processContent", processContentFunc)
+	js.Global().Set("setBPCRuleset", setBPCRulesetFunc)
 
 	fmt.Printf("Ladderflare WASM initialized with %d rules, UserAgent: %s\n", len(parsedRules), UserAgent)
 
@@ -1020,7 +1022,6 @@ func parseRuleset() {
 		return
 	}
 	fmt.Printf("Successfully parsed %d merged rules from embedded JSON\n", len(parsedRules))
-	globalBlockScriptsMerged = collectGlobalBlockScripts(parsedRules)
 
 	// Parse ladder-only ruleset
 	err = json.Unmarshal([]byte(embeddedLadderRuleset), &parsedLadderRules)
@@ -1039,6 +1040,59 @@ func parseRuleset() {
 	}
 	fmt.Printf("Successfully parsed %d BPC rules from embedded JSON\n", len(parsedBPCRules))
 	globalBlockScriptsBPC = collectGlobalBlockScripts(parsedBPCRules)
+
+	// Merged mode layers Ladder on top of BPC at runtime, so merged global patterns
+	// should reflect both sources (and remain correct if BPC rules update at runtime).
+	globalBlockScriptsMerged = unionStrings(globalBlockScriptsBPC, globalBlockScriptsLadder)
+}
+
+func unionStrings(a, b []string) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0, len(a)+len(b))
+	for _, v := range a {
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	for _, v := range b {
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
+// setBPCRuleset replaces the in-memory BPC ruleset at runtime.
+// args[0] must be a JSON string in Ladderflare embedded ruleset format (array of Rule objects).
+func setBPCRuleset(this js.Value, args []js.Value) any {
+	if len(args) < 1 {
+		return "missing ruleset JSON argument"
+	}
+	rulesJSON := args[0].String()
+	if rulesJSON == "" {
+		return "empty ruleset JSON"
+	}
+
+	var next RuleSet
+	if err := json.Unmarshal([]byte(rulesJSON), &next); err != nil {
+		return fmt.Sprintf("failed to parse BPC ruleset JSON: %v", err)
+	}
+
+	parsedBPCRules = next
+	globalBlockScriptsBPC = collectGlobalBlockScripts(parsedBPCRules)
+	globalBlockScriptsMerged = unionStrings(globalBlockScriptsBPC, globalBlockScriptsLadder)
+
+	return true
 }
 
 // collectGlobalBlockScripts gathers unique blockScriptsGeneral patterns from a ruleset

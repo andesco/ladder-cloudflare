@@ -3,33 +3,33 @@ main = "index.js"
 compatibility_date = "2025-09-13"
 # account_id = "" # optional: your unqiue Cloudflare account ID
 
-workers_dev = true # use default {hostname}.{account}.workers.dev
+workers_dev = true # enable {name}.{account}.workers.dev
+preview_urls = true # enable version/alias preview URLs: {preview}-{name}.{account}.workers.dev
 
 # [[routes]]
 # pattern = "ladder.example.com"
 # custom_domain = true
 
-# [build]
-# command = "npm run build"
-
 [assets]
 directory = "./public"
 
-# Environment variables for Ladder compatibility
-# These can be set via Cloudflare dashboard or wrangler commands:
-# wrangler secret put USERPASS
-# wrangler env set USER_AGENT "custom agent"
 [vars]
-EXPOSE_RULESET = "true"
-ALLOWED_DOMAINS_RULESET = "false"
 VERSION = "0.0.0"
+EXPOSE_RULESET = "true"
 
-# Optional vars (commented out - set via dashboard/CLI):
+# Optional: if set, the scheduled cron will fetch manifest.json and update BPC ruleset in KV.
+# RULESET_URL = "https://example.com/manifest.json"
+
 # USER_AGENT = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
 # USERPASS = "username:password"
 # ALLOWED_DOMAINS = "example.com,example.org"
+# ALLOWED_DOMAINS_RULESET = "false"
 # X_FORWARDED_FOR = "66.249.66.1"
 # DISABLE_FORM = "false"
+
+[triggers]
+# Check for BPC ruleset updates daily at 12:00 UTC (noon GMT).
+crons = ["0 12 * * *"]
 
 [[rules]]
 type = "CompiledWasm"
