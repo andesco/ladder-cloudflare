@@ -83,13 +83,42 @@ Ladderflare does not support these legacy variables:
 > [!tip]
 > Ladderflare does not log fetched URLs. Consider enabling Cloudflare Analytics to log usage.
 
-### Ruleset Examples
-
-See example rules and the canonical Ladder rules in [`everywall/ladder-rules`][ladder-rules]. This repo embeds generated JSON rulesets during build (not committed).
-
-For the Ladderflare-specific embedded ruleset schema, reserved values, and runtime semantics, see [`RULESET-SPEC.md`](RULESET-SPEC.md).
-
 ## Development
+
+### Request and Ruleset Processing
+
+The Worker is a thin wrapper around the Ladder WASM runtime. The ruleset drives nearly all behavior.
+
+1. **parse incoming request**
+   - worker uses form input or extracts target URL from the request path `/{URL}`
+2. **select ruleset mode**
+   - default merged ruleset: `/{URL}`
+   - BPC-only: `/json/{URL}`
+   - Ladder-only: `/yaml/{URL}`
+3. **match rules**
+   - sing ruleset: WASM runtime finds first matching rule by `host` and optional `paths`/`pathExclusions`
+   - merged ruleset: WASM runtime finds first matching rule in each ruleset independently, then overlays them into an effective rule
+4. **compute fetch instructions**
+   - apply `urlMods` / `googleCache` to produce the final fetch URL.
+   - muild request headers: `User-Agent`, `Referer`, `X-Forwarded-For`, `Cookie`, optional `extraHeaders`
+   - optionally generate a random `X-Forwarded-For` when `randomIP` is set
+5. **fetch origin content**
+   - worker performs `fetch()` with the computed URL + headers
+6. **process response**
+   - non-HTML assets: worker returns payload without DOM processing to avoid corrupting response
+   - HTML: WASM runtime applies (in order):
+     - `regexRules`
+     - `blockScripts` / `blockScriptsGeneral`
+     - `blockJsInline`
+     - `csCode` DOM operations
+     - `ampUnhide`
+     - rewrite relative URLs to use proxy: `/https://host/...`
+     - `injections`
+     - `clearStorage`
+   - if rule sets `headers.content-security-policy`, override response CSP header to match
+
+> [!note]
+> See [`RULESET-SPEC.md`](RULESET-SPEC.md) for the Ladderflare-specific embedded ruleset schema, reserved values, and runtime semantics.
 
 ### How It Works
 
@@ -97,7 +126,7 @@ For the Ladderflare-specific embedded ruleset schema, reserved values, and runti
 sequenceDiagram
     participant Client
     participant Worker as Ladderflare Worker
-    participant WASM as Ladder (WASM)
+    participant WASM as Ladder WASM
     participant Origin as Website
 
     Client->>Worker: GET /{url}
@@ -111,12 +140,12 @@ sequenceDiagram
 ### Build Commands
 
 ```bash
-npm run build:rules   # fetch latest BPC sites list and merge with local Ladder rules
-npm run build:wasm    # compile WebAssembly binary
 npm run build
-npm run dev:local     # run locally using wrangler.local.toml
-npm run deploy:local  # deploy using wrangler.local.toml
+npm run build:rules   # build embed rulesets using sites_aggregated.js + ruleset-ladder.yaml
+npm run build:wasm    # compile WebAssembly binary
 npm run deploy
+npm run deploy:local  # deploy using wrangler.local.toml
+npm run dev:local     # run locally using wrangler.local.toml
 ```
 
 ### WebAssembly Implementation
