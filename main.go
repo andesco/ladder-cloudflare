@@ -37,8 +37,8 @@ var (
 	globalBlockScriptsLadder []string
 	globalBlockScriptsBPC    []string
 	random                   = rand.New(rand.NewSource(time.Now().UnixNano()))
-	cssURLFuncPattern        = regexp.MustCompile(`url\(\s*(['"]?)([^'")]+)\1\s*\)`)
-	htmlAttrPattern          = regexp.MustCompile(`(?i)\b(src|href|action)\s*=\s*(['"])(.*?)\2`)
+	cssURLFuncPattern        = regexp.MustCompile(`url\(\s*("[^"]*"|'[^']*'|[^'")]+)\s*\)`)
+	htmlAttrPattern          = regexp.MustCompile(`(?i)\b(src|href|action)\s*=\s*("[^"]*"|'[^']*')`)
 )
 
 // Full-featured rule structures with YAML/JSON tags (matching ladder/pkg/ruleset)
@@ -440,13 +440,17 @@ func rewriteHTML(body, originalHost string) string {
 func rewriteHTMLFallback(body, originalHost string) string {
 	body = htmlAttrPattern.ReplaceAllStringFunc(body, func(match string) string {
 		submatches := htmlAttrPattern.FindStringSubmatch(match)
-		if len(submatches) != 4 {
+		if len(submatches) != 3 {
 			return match
 		}
 
 		attr := submatches[1]
-		quote := submatches[2]
-		value := submatches[3]
+		quotedValue := submatches[2]
+		if len(quotedValue) < 2 {
+			return match
+		}
+		quote := quotedValue[:1]
+		value := quotedValue[1 : len(quotedValue)-1]
 		rewritten := rewriteProxyURLRef(value, originalHost)
 		if rewritten == value {
 			return match
@@ -502,12 +506,26 @@ func rewriteProxyURLRef(rawValue, originalHost string) string {
 func rewriteCSSURLRefs(content, originalHost string) string {
 	return cssURLFuncPattern.ReplaceAllStringFunc(content, func(match string) string {
 		submatches := cssURLFuncPattern.FindStringSubmatch(match)
-		if len(submatches) != 3 {
+		if len(submatches) != 2 {
 			return match
 		}
 
-		quote := submatches[1]
-		urlRef := submatches[2]
+		token := strings.TrimSpace(submatches[1])
+		if token == "" {
+			return match
+		}
+
+		quote := ""
+		urlRef := token
+		if len(token) >= 2 {
+			first := token[:1]
+			last := token[len(token)-1:]
+			if (first == `"` && last == `"`) || (first == `'` && last == `'`) {
+				quote = first
+				urlRef = token[1 : len(token)-1]
+			}
+		}
+
 		rewritten := rewriteProxyURLRef(urlRef, originalHost)
 		if rewritten == urlRef {
 			return match
