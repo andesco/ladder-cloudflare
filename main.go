@@ -23,16 +23,22 @@ var embeddedLadderRuleset string
 //go:embed ruleset-bpc-embedded.json
 var embeddedBPCRuleset string
 
+//go:embed test-urls-embedded.txt
+var embeddedTestURLsText string
+
 var (
 	UserAgent                = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
 	ForwardedFor             = "66.249.66.1"
 	parsedRules              RuleSet // merged (default)
 	parsedLadderRules        RuleSet // ladder-only (for /yaml/ routes)
 	parsedBPCRules           RuleSet // BPC-only (for /json/ routes)
+	embeddedTestURLs         []string
 	globalBlockScriptsMerged []string
 	globalBlockScriptsLadder []string
 	globalBlockScriptsBPC    []string
 	random                   = rand.New(rand.NewSource(time.Now().UnixNano()))
+	cssURLFuncPattern        = regexp.MustCompile(`url\(\s*(['"]?)([^'")]+)\1\s*\)`)
+	htmlAttrPattern          = regexp.MustCompile(`(?i)\b(src|href|action)\s*=\s*(['"])(.*?)\2`)
 )
 
 // Full-featured rule structures with YAML/JSON tags (matching ladder/pkg/ruleset)
@@ -418,52 +424,7 @@ func rewriteHTML(body, originalHost string) string {
 		return rewriteHTMLFallback(body, originalHost)
 	}
 
-	proxyPrefix := "/https://" + originalHost + "/"
-
-	// Rewrite image sources
-	doc.Find("img[src]").Each(func(i int, s *goquery.Selection) {
-		src, exists := s.Attr("src")
-		if exists && strings.HasPrefix(src, "/") && !strings.HasPrefix(src, "//") {
-			s.SetAttr("src", proxyPrefix+strings.TrimPrefix(src, "/"))
-		}
-	})
-
-	// Rewrite script sources
-	doc.Find("script[src]").Each(func(i int, s *goquery.Selection) {
-		src, exists := s.Attr("src")
-		if exists && strings.HasPrefix(src, "/") && !strings.HasPrefix(src, "//") {
-			s.SetAttr("src", proxyPrefix+strings.TrimPrefix(src, "/"))
-		}
-	})
-
-	// Rewrite link hrefs
-	doc.Find("a[href]").Each(func(i int, s *goquery.Selection) {
-		href, exists := s.Attr("href")
-		if exists {
-			if strings.HasPrefix(href, "/") && !strings.HasPrefix(href, "//") {
-				s.SetAttr("href", proxyPrefix+strings.TrimPrefix(href, "/"))
-			} else if strings.HasPrefix(href, "https://"+originalHost) {
-				// Convert absolute URLs back to proxy format
-				s.SetAttr("href", "/https://"+originalHost+"/"+strings.TrimPrefix(href, "https://"+originalHost+"/"))
-			}
-		}
-	})
-
-	// Rewrite link rel=stylesheet hrefs
-	doc.Find("link[href]").Each(func(i int, s *goquery.Selection) {
-		href, exists := s.Attr("href")
-		if exists && strings.HasPrefix(href, "/") && !strings.HasPrefix(href, "//") {
-			s.SetAttr("href", proxyPrefix+strings.TrimPrefix(href, "/"))
-		}
-	})
-
-	// Rewrite form actions
-	doc.Find("form[action]").Each(func(i int, s *goquery.Selection) {
-		action, exists := s.Attr("action")
-		if exists && strings.HasPrefix(action, "/") && !strings.HasPrefix(action, "//") {
-			s.SetAttr("action", proxyPrefix+strings.TrimPrefix(action, "/"))
-		}
-	})
+	rewriteHTMLDoc(doc, originalHost)
 
 	// Get the modified HTML
 	html, err := doc.Html()
@@ -472,39 +433,87 @@ func rewriteHTML(body, originalHost string) string {
 		return rewriteHTMLFallback(body, originalHost)
 	}
 
-	// Still need to handle CSS url() rewrites with string replacement since GoQuery doesn't parse CSS
-	html = strings.ReplaceAll(html, `url('/`, `url('`+proxyPrefix)
-	html = strings.ReplaceAll(html, `url(/`, `url(`+proxyPrefix)
-
-	return html
+	return rewriteCSSURLRefs(html, originalHost)
 }
 
 // rewriteHTMLFallback provides string-based rewriting as fallback
 func rewriteHTMLFallback(body, originalHost string) string {
-	// Rewrite relative URLs to go through proxy
-	proxyPrefix := "/https://" + originalHost + "/"
+	body = htmlAttrPattern.ReplaceAllStringFunc(body, func(match string) string {
+		submatches := htmlAttrPattern.FindStringSubmatch(match)
+		if len(submatches) != 4 {
+			return match
+		}
 
-	// Images
-	imagePattern := `<img\s+([^>]*\s+)?src="(/)([^"]*)"`
-	re := regexp.MustCompile(imagePattern)
-	body = re.ReplaceAllString(body, fmt.Sprintf(`<img $1src="%s$3"`, proxyPrefix))
+		attr := submatches[1]
+		quote := submatches[2]
+		value := submatches[3]
+		rewritten := rewriteProxyURLRef(value, originalHost)
+		if rewritten == value {
+			return match
+		}
+		return fmt.Sprintf(`%s=%s%s%s`, attr, quote, rewritten, quote)
+	})
 
-	// Scripts
-	scriptPattern := `<script\s+([^>]*\s+)?src="(/)([^"]*)"`
-	reScript := regexp.MustCompile(scriptPattern)
-	body = reScript.ReplaceAllString(body, fmt.Sprintf(`<script $1src="%s$3"`, proxyPrefix))
+	return rewriteCSSURLRefs(body, originalHost)
+}
 
-	// Links
-	body = strings.ReplaceAll(body, `href="/`, `href="`+proxyPrefix)
+func proxyPrefixForHost(host string) string {
+	return "/https://" + host + "/"
+}
 
-	// CSS urls
-	body = strings.ReplaceAll(body, `url('/`, `url('`+proxyPrefix)
-	body = strings.ReplaceAll(body, `url(/`, `url(`+proxyPrefix)
+func rewriteProxyURLRef(rawValue, originalHost string) string {
+	trimmed := strings.TrimSpace(rawValue)
+	if trimmed == "" {
+		return rawValue
+	}
 
-	// Absolute URLs back to proxy
-	body = strings.ReplaceAll(body, `href="https://`+originalHost, `href="/https://`+originalHost+"/")
+	// Protocol-relative URL: keep it untouched.
+	if strings.HasPrefix(trimmed, "//") {
+		return rawValue
+	}
 
-	return body
+	// Already proxied absolute URL: keep as-is to avoid double-prefixing.
+	if strings.HasPrefix(trimmed, "/https://") || strings.HasPrefix(trimmed, "/http://") {
+		return "/" + strings.TrimPrefix(trimmed, "/")
+	}
+
+	// Root-relative path should go through the current host proxy.
+	if strings.HasPrefix(trimmed, "/") {
+		return proxyPrefixForHost(originalHost) + strings.TrimPrefix(trimmed, "/")
+	}
+
+	// Keep same-host absolute URLs on-proxy.
+	if strings.HasPrefix(trimmed, "https://"+originalHost+"/") {
+		return "/https://" + originalHost + "/" + strings.TrimPrefix(trimmed, "https://"+originalHost+"/")
+	}
+	if strings.HasPrefix(trimmed, "http://"+originalHost+"/") {
+		return "/http://" + originalHost + "/" + strings.TrimPrefix(trimmed, "http://"+originalHost+"/")
+	}
+	if trimmed == "https://"+originalHost {
+		return "/https://" + originalHost + "/"
+	}
+	if trimmed == "http://"+originalHost {
+		return "/http://" + originalHost + "/"
+	}
+
+	return rawValue
+}
+
+func rewriteCSSURLRefs(content, originalHost string) string {
+	return cssURLFuncPattern.ReplaceAllStringFunc(content, func(match string) string {
+		submatches := cssURLFuncPattern.FindStringSubmatch(match)
+		if len(submatches) != 3 {
+			return match
+		}
+
+		quote := submatches[1]
+		urlRef := submatches[2]
+		rewritten := rewriteProxyURLRef(urlRef, originalHost)
+		if rewritten == urlRef {
+			return match
+		}
+		return fmt.Sprintf("url(%s%s%s)", quote, rewritten, quote)
+	})
 }
 
 // Helper functions for creating responses
@@ -577,6 +586,11 @@ func getRandomTestURL() string {
 
 // getTestURLs extracts all test URLs from the ruleset
 func getTestURLs() []string {
+	// Prefer build-time provided test-urls.txt (embedded via test-urls-embedded.txt).
+	if len(embeddedTestURLs) > 0 {
+		return embeddedTestURLs
+	}
+
 	testURLs := make([]string, 0)
 	for _, rule := range parsedRules {
 		for _, test := range rule.Tests {
@@ -681,9 +695,7 @@ func processContent(this js.Value, args []js.Value) interface{} {
 	}
 
 	// CSS url() rewrites (GoQuery doesn't parse CSS)
-	proxyPrefix := "/https://" + parsedURL.Host + "/"
-	html = strings.ReplaceAll(html, `url('/`, `url('`+proxyPrefix)
-	html = strings.ReplaceAll(html, `url(/`, `url(`+proxyPrefix)
+	html = rewriteCSSURLRefs(html, parsedURL.Host)
 
 	// Create result with processed content
 	result := js.Global().Get("Object").New()
@@ -800,46 +812,36 @@ func applyContentInjectionsStringFallback(content string, injections []Injection
 
 // rewriteHTMLDoc rewrites HTML content to proxy relative URLs on an existing GoQuery doc
 func rewriteHTMLDoc(doc *goquery.Document, originalHost string) {
-	proxyPrefix := "/https://" + originalHost + "/"
-
 	doc.Find("img[src]").Each(func(i int, s *goquery.Selection) {
-		src, exists := s.Attr("src")
-		if exists && strings.HasPrefix(src, "/") && !strings.HasPrefix(src, "//") {
-			s.SetAttr("src", proxyPrefix+strings.TrimPrefix(src, "/"))
-		}
+		rewriteSelectionAttr(s, "src", originalHost)
 	})
 
 	doc.Find("script[src]").Each(func(i int, s *goquery.Selection) {
-		src, exists := s.Attr("src")
-		if exists && strings.HasPrefix(src, "/") && !strings.HasPrefix(src, "//") {
-			s.SetAttr("src", proxyPrefix+strings.TrimPrefix(src, "/"))
-		}
+		rewriteSelectionAttr(s, "src", originalHost)
 	})
 
 	doc.Find("a[href]").Each(func(i int, s *goquery.Selection) {
-		href, exists := s.Attr("href")
-		if exists {
-			if strings.HasPrefix(href, "/") && !strings.HasPrefix(href, "//") {
-				s.SetAttr("href", proxyPrefix+strings.TrimPrefix(href, "/"))
-			} else if strings.HasPrefix(href, "https://"+originalHost) {
-				s.SetAttr("href", "/https://"+originalHost+"/"+strings.TrimPrefix(href, "https://"+originalHost+"/"))
-			}
-		}
+		rewriteSelectionAttr(s, "href", originalHost)
 	})
 
 	doc.Find("link[href]").Each(func(i int, s *goquery.Selection) {
-		href, exists := s.Attr("href")
-		if exists && strings.HasPrefix(href, "/") && !strings.HasPrefix(href, "//") {
-			s.SetAttr("href", proxyPrefix+strings.TrimPrefix(href, "/"))
-		}
+		rewriteSelectionAttr(s, "href", originalHost)
 	})
 
 	doc.Find("form[action]").Each(func(i int, s *goquery.Selection) {
-		action, exists := s.Attr("action")
-		if exists && strings.HasPrefix(action, "/") && !strings.HasPrefix(action, "//") {
-			s.SetAttr("action", proxyPrefix+strings.TrimPrefix(action, "/"))
-		}
+		rewriteSelectionAttr(s, "action", originalHost)
 	})
+}
+
+func rewriteSelectionAttr(s *goquery.Selection, attr, originalHost string) {
+	value, exists := s.Attr(attr)
+	if !exists {
+		return
+	}
+	rewritten := rewriteProxyURLRef(value, originalHost)
+	if rewritten != value {
+		s.SetAttr(attr, rewritten)
+	}
 }
 
 // applyInjectionsDoc applies content injections on an existing GoQuery doc
@@ -1041,9 +1043,23 @@ func parseRuleset() {
 	fmt.Printf("Successfully parsed %d BPC rules from embedded JSON\n", len(parsedBPCRules))
 	globalBlockScriptsBPC = collectGlobalBlockScripts(parsedBPCRules)
 
+	embeddedTestURLs = parseEmbeddedTestURLs(embeddedTestURLsText)
+
 	// Merged mode layers Ladder on top of BPC at runtime, so merged global patterns
 	// should reflect both sources (and remain correct if BPC rules update at runtime).
 	globalBlockScriptsMerged = unionStrings(globalBlockScriptsBPC, globalBlockScriptsLadder)
+}
+
+func parseEmbeddedTestURLs(text string) []string {
+	out := make([]string, 0)
+	for _, line := range strings.Split(text, "\n") {
+		l := strings.TrimSpace(line)
+		if l == "" || strings.HasPrefix(l, "#") {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
 }
 
 func unionStrings(a, b []string) []string {
