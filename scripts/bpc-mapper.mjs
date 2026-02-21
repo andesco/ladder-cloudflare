@@ -84,9 +84,9 @@ export function validateBPCData(bpcData) {
     }
 
     if (entry.random_ip) {
-      // Allow: "eu" (special), true/"true" (generic random)
+      // Allow: "eu" (special), true/"true"/"all" (generic random)
       const v = entry.random_ip;
-      const ok = v === 'eu' || v === true || v === 'true';
+      const ok = v === 'eu' || v === true || v === 'true' || v === 'all';
       if (!ok) record(unknown.random_ip, v, domain);
     }
   }
@@ -230,7 +230,7 @@ export function mapBPCEntry(entry) {
   if (entry.random_ip) {
     if (entry.random_ip === 'eu') {
       rule.randomIP = 'eu';
-    } else if (entry.random_ip === true || entry.random_ip === 'true') {
+    } else if (entry.random_ip === true || entry.random_ip === 'true' || entry.random_ip === 'all') {
       rule.randomIP = 'true';
     } else {
       throw new Error(`Unknown BPC random_ip value '${entry.random_ip}' for domain '${domain}'`);
@@ -458,16 +458,110 @@ export function cleanRule(rule) {
 }
 
 export function buildBpcOnlyRuleset(bpcData) {
-  const bpcRules = [];
-  for (const entry of bpcData) {
-    const rule = mapBPCEntry(entry);
-    if (!rule) continue;
-    bpcRules.push(rule);
-    const excRules = handleExceptions(entry);
-    for (const excRule of excRules) bpcRules.push(excRule);
-  }
-
+  const bpcRules = mapBpcDataToRules(bpcData);
   const grouped = regroupRules(bpcRules);
   return grouped.map(cleanRule);
 }
 
+function mapBpcDataToRules(bpcData) {
+  const bpcRules = [];
+
+  for (const entry of bpcData) {
+    const rule = mapBPCEntry(entry);
+    if (!rule) continue;
+
+    bpcRules.push(rule);
+
+    const excRules = handleExceptions(entry);
+    for (const excRule of excRules) {
+      bpcRules.push(excRule);
+    }
+  }
+
+  return bpcRules;
+}
+
+function indexLadderRules(ladderRules) {
+  const index = {};
+
+  for (const rule of ladderRules) {
+    if (!rule || typeof rule !== 'object') {
+      continue;
+    }
+
+    const domains = [];
+    if (typeof rule.domain === 'string' && rule.domain.length > 0) {
+      domains.push(rule.domain);
+    }
+    if (Array.isArray(rule.domains)) {
+      for (const d of rule.domains) {
+        if (typeof d === 'string' && d.length > 0) {
+          domains.push(d);
+        }
+      }
+    }
+
+    for (const domain of domains) {
+      index[domain] = rule;
+    }
+  }
+
+  return index;
+}
+
+export function buildMergedRuleset(bpcData, ladderRules = []) {
+  const bpcRules = mapBpcDataToRules(bpcData);
+  const ladderIndex = indexLadderRules(Array.isArray(ladderRules) ? ladderRules : []);
+
+  const mergedRules = [];
+  const ladderDomainsUsed = new Set();
+
+  for (const bpcRule of bpcRules) {
+    const domain = bpcRule?.domain;
+    const ladderRule = domain ? ladderIndex[domain] : null;
+
+    if (ladderRule) {
+      mergedRules.push(mergeRules(bpcRule, ladderRule));
+      ladderDomainsUsed.add(domain);
+
+      if (typeof ladderRule.domain === 'string' && ladderRule.domain.length > 0) {
+        ladderDomainsUsed.add(ladderRule.domain);
+      }
+      if (Array.isArray(ladderRule.domains)) {
+        for (const d of ladderRule.domains) {
+          if (typeof d === 'string' && d.length > 0) {
+            ladderDomainsUsed.add(d);
+          }
+        }
+      }
+    } else {
+      mergedRules.push(bpcRule);
+    }
+  }
+
+  for (const ladderRule of Array.isArray(ladderRules) ? ladderRules : []) {
+    if (!ladderRule || typeof ladderRule !== 'object') {
+      continue;
+    }
+
+    const domains = [];
+    if (typeof ladderRule.domain === 'string' && ladderRule.domain.length > 0) {
+      domains.push(ladderRule.domain);
+    }
+    if (Array.isArray(ladderRule.domains)) {
+      for (const d of ladderRule.domains) {
+        if (typeof d === 'string' && d.length > 0) {
+          domains.push(d);
+        }
+      }
+    }
+
+    const allUsed = domains.length > 0 && domains.every((d) => ladderDomainsUsed.has(d));
+    if (!allUsed) {
+      mergedRules.push(ladderRule);
+    }
+  }
+
+  const grouped = regroupRules(mergedRules);
+  return grouped.map(cleanRule);
+}
