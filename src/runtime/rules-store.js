@@ -33,6 +33,37 @@ function uniqueStrings(values) {
   return output;
 }
 
+function stablePatternKey(value) {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (!value || typeof value !== 'object') {
+    return '';
+  }
+
+  return JSON.stringify({
+    pattern: value.pattern || '',
+    excludedDomains: Array.isArray(value.excludedDomains) ? [...value.excludedDomains].sort() : [],
+  });
+}
+
+function uniquePatterns(values) {
+  const seen = new Set();
+  const output = [];
+
+  for (const value of values) {
+    const key = stablePatternKey(value);
+    if (!key || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    output.push(value);
+  }
+
+  return output;
+}
+
 function collectDomains(rules) {
   const output = [];
 
@@ -86,11 +117,13 @@ function collectGlobalBlockPatterns(rules) {
     for (const pattern of rule.blockScriptsGeneral) {
       if (typeof pattern === 'string' && pattern.length > 0) {
         output.push(pattern);
+      } else if (pattern && typeof pattern === 'object' && typeof pattern.pattern === 'string' && pattern.pattern.length > 0) {
+        output.push(pattern);
       }
     }
   }
 
-  return uniqueStrings(output);
+  return uniquePatterns(output);
 }
 
 function replaceState(rules, rulesJSON, version) {
@@ -126,6 +159,20 @@ export function getRulesetJSON() {
 
 export function getRulesetDomains() {
   return activeDomains;
+}
+
+export function getRulesetVersion() {
+  return loadedVersion;
+}
+
+export function getRulesetStats() {
+  return {
+    version: loadedVersion,
+    rules: activeRules.length,
+    domains: activeDomains.length,
+    tests: activeTestURLs.length,
+    globalBlockPatterns: activeGlobalBlockPatterns.length,
+  };
 }
 
 export function getGlobalBlockPatterns() {

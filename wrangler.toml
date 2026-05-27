@@ -1,6 +1,6 @@
 name = "bypasser"
 main = "index.js"
-compatibility_date = "2025-09-13"
+compatibility_date = "2026-05-27"
 # account_id = "" # optional: your unique Cloudflare account ID
 
 workers_dev = true
@@ -21,6 +21,10 @@ ALLOWED_DOMAINS_RULESET = "true"
 
 [triggers]
 crons = ["0 12 * * *"]
+
+[observability]
+enabled = true
+head_sampling_rate = 1
 
 [[kv_namespaces]]
 binding = "CONFIG_KV"

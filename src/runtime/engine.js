@@ -20,11 +20,11 @@ export function getFetchInstructions(targetURL, env) {
   return buildFetchInstructions(targetURL, getRules(), env);
 }
 
-export function processHTMLContent(content, targetURL, rule) {
+export function processHTMLContent(content, targetURL, rule, options = {}) {
   const selectedRule =
     rule && typeof rule === 'object' && Object.keys(rule).length > 0
       ? rule
       : findRuleForURL(targetURL, getRules());
 
-  return processContent(content, targetURL, selectedRule, getGlobalBlockPatterns());
+  return processContent(content, targetURL, selectedRule, getGlobalBlockPatterns(), options);
 }

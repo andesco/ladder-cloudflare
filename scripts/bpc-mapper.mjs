@@ -24,6 +24,30 @@ function looksLikeURL(value) {
   return typeof value === 'string' && /^https?:\/\//i.test(value);
 }
 
+function normalizeStringArray(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.filter((item) => typeof item === 'string' && item.length > 0);
+  return typeof value === 'string' && value.length > 0 ? [value] : [];
+}
+
+function mapCsCodeOperation(op) {
+  const mapped = {};
+  if (op.cond) mapped.cond = op.cond;
+  if (op.hide_elem) mapped.hide_elem = op.hide_elem;
+  if (op.rm_elem) mapped.rm_elem = true;
+  if (op.rm_class) mapped.rm_class = op.rm_class;
+  if (op.rm_attrib) mapped.rm_attrib = op.rm_attrib;
+  if (op.set_attrib) mapped.set_attrib = op.set_attrib;
+  if (op.add_style) mapped.add_style = op.add_style;
+  if (Array.isArray(op.elems)) {
+    mapped.elems = op.elems
+      .filter((child) => child && typeof child === 'object')
+      .map(mapCsCodeOperation)
+      .filter((child) => Object.keys(child).length > 0);
+  }
+  return mapped;
+}
+
 export function parseSitesAggregatedText(text) {
   if (typeof text !== 'string') throw new Error('sites_aggregated input must be a string');
   const trimmed = text.trim();
@@ -206,20 +230,35 @@ export function mapBPCEntry(entry) {
     hasHeaders = true;
   }
 
-  // Custom headers -> cookie + extraHeaders
-  if (entry.headers_custom) {
-    const extraHeaders = {};
-    for (const [key, val] of Object.entries(entry.headers_custom)) {
+  function addExtraHeaders(headersObj) {
+    const extraHeaders = { ...(rule.extraHeaders || {}) };
+    let changed = false;
+    for (const [key, val] of Object.entries(headersObj || {})) {
+      if (val === undefined || val === null) {
+        continue;
+      }
       if (key.toLowerCase() === 'cookie') {
-        headers['cookie'] = val;
+        headers.cookie = String(val);
         hasHeaders = true;
       } else {
         extraHeaders[key] = String(val);
+        changed = true;
       }
     }
-    if (Object.keys(extraHeaders).length > 0) {
+    if (changed) {
       rule.extraHeaders = extraHeaders;
     }
+  }
+
+  // Custom headers -> cookie + extraHeaders
+  if (entry.headers_custom) {
+    addExtraHeaders(entry.headers_custom);
+  }
+
+  // BPC uses cs_param for some fetch/header paths in Chromium-only rules.
+  // In Worker mode the closest equivalent is to send them as outbound headers.
+  if (entry.cs_param && typeof entry.cs_param === 'object' && !Array.isArray(entry.cs_param)) {
+    addExtraHeaders(entry.cs_param);
   }
 
   if (hasHeaders) {
@@ -249,7 +288,11 @@ export function mapBPCEntry(entry) {
       typeof entry.block_regex_general === 'string'
         ? [entry.block_regex_general]
         : entry.block_regex_general;
-    rule.blockScriptsGeneral = patterns.map((p) => p.replace(/\{domain\}/g, domain.replace(/\./g, '\\.')));
+    const excludedDomains = normalizeStringArray(entry.excluded_domains);
+    rule.blockScriptsGeneral = patterns.map((p) => {
+      const pattern = p.replace(/\{domain\}/g, domain.replace(/\./g, '\\.'));
+      return excludedDomains.length > 0 ? { pattern, excludedDomains } : pattern;
+    });
   }
 
   // cs_code (content script operations)
@@ -266,17 +309,10 @@ export function mapBPCEntry(entry) {
       ops = entry.cs_code;
     }
     if (ops && Array.isArray(ops)) {
-      rule.csCode = ops.map((op) => {
-        const mapped = {};
-        if (op.cond) mapped.cond = op.cond;
-        if (op.hide_elem) mapped.hide_elem = op.hide_elem;
-        if (op.rm_elem) mapped.rm_elem = true;
-        if (op.rm_class) mapped.rm_class = op.rm_class;
-        if (op.rm_attrib) mapped.rm_attrib = op.rm_attrib;
-        if (op.set_attrib) mapped.set_attrib = op.set_attrib;
-        if (op.add_style) mapped.add_style = op.add_style;
-        return mapped;
-      });
+      rule.csCode = ops
+        .filter((op) => op && typeof op === 'object')
+        .map(mapCsCodeOperation)
+        .filter((op) => Object.keys(op).length > 0);
     }
   }
 
@@ -298,6 +334,41 @@ export function mapBPCEntry(entry) {
   // Clear local/session storage
   if (entry.cs_clear_lclstrg) {
     rule.clearStorage = true;
+  }
+
+  const contentExtraction = {};
+  if (entry.ld_json) contentExtraction.ldJson = entry.ld_json;
+  if (entry.ld_json_next) contentExtraction.ldJsonNext = entry.ld_json_next;
+  if (entry.ld_json_url) contentExtraction.ldJsonUrl = entry.ld_json_url;
+  if (entry.ld_json_source) contentExtraction.ldJsonSource = entry.ld_json_source;
+  if (Object.keys(contentExtraction).length > 0) {
+    rule.contentExtraction = contentExtraction;
+  }
+
+  if (entry.ld_archive_is) {
+    rule.archiveFallback = { selector: entry.ld_archive_is };
+  }
+
+  if (entry.add_ext_link && entry.add_ext_link_type) {
+    rule.externalLink = {
+      selector: entry.add_ext_link,
+      type: entry.add_ext_link_type,
+    };
+  }
+
+  if (entry.remove_cookies || entry.remove_cookies_select_drop || entry.remove_cookies_select_hold) {
+    rule.cookiePolicy = {};
+    if (entry.remove_cookies) {
+      rule.cookiePolicy.removeAll = true;
+    }
+    const drop = normalizeStringArray(entry.remove_cookies_select_drop);
+    if (drop.length > 0) {
+      rule.cookiePolicy.drop = drop;
+    }
+    const hold = normalizeStringArray(entry.remove_cookies_select_hold);
+    if (hold.length > 0) {
+      rule.cookiePolicy.hold = hold;
+    }
   }
 
   return rule;
@@ -433,6 +504,10 @@ export function cleanRule(rule) {
   if (rule.googleCache) cleaned.googleCache = rule.googleCache;
 
   if (rule.extraHeaders && Object.keys(rule.extraHeaders).length > 0) cleaned.extraHeaders = rule.extraHeaders;
+  if (rule.cookiePolicy && Object.keys(rule.cookiePolicy).length > 0) cleaned.cookiePolicy = rule.cookiePolicy;
+  if (rule.contentExtraction && Object.keys(rule.contentExtraction).length > 0) cleaned.contentExtraction = rule.contentExtraction;
+  if (rule.archiveFallback && Object.keys(rule.archiveFallback).length > 0) cleaned.archiveFallback = rule.archiveFallback;
+  if (rule.externalLink && Object.keys(rule.externalLink).length > 0) cleaned.externalLink = rule.externalLink;
 
   if (rule.randomIP) cleaned.randomIP = rule.randomIP;
   if (rule.blockScripts && rule.blockScripts.length > 0) cleaned.blockScripts = rule.blockScripts;
