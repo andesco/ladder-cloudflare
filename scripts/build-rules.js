@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import yaml from 'yaml';
 
-const BPC_FILE = 'sites_aggregated.js';
 const LADDER_FILE = 'ruleset-ladder.yaml';
 const BPC_OUTPUT_FILE = 'ruleset-bpc-embedded.json';
 const LADDER_OUTPUT_FILE = 'ruleset-ladder-embedded.json';
@@ -21,14 +20,6 @@ async function loadBpcMapper() {
   return bpcMapper;
 }
 
-function loadLocalBPC() {
-  const bpcPath = path.resolve(BPC_FILE);
-  if (!fs.existsSync(bpcPath)) {
-    throw new Error(`Missing local BPC file '${BPC_FILE}' (expected at ${bpcPath})`);
-  }
-  return fs.readFileSync(bpcPath, 'utf-8');
-}
-
 async function fetchText(url, label) {
   const response = await fetch(url, { cache: 'no-store' });
   if (!response.ok) {
@@ -37,19 +28,19 @@ async function fetchText(url, label) {
   return response.text();
 }
 
-function loadWranglerRulesetURL() {
-  const wranglerPath = path.resolve('wrangler.toml');
+function loadWranglerManifestURL() {
+  const wranglerPath = path.resolve('wrangler.jsonc');
   if (!fs.existsSync(wranglerPath)) {
     return '';
   }
 
   const raw = fs.readFileSync(wranglerPath, 'utf-8');
-  const match = raw.match(/^\s*RULESET_URL\s*=\s*["']([^"']+)["']/m);
+  const match = raw.match(/"MANIFEST_URL"\s*:\s*"([^"]+)"/);
   return match?.[1] || '';
 }
 
 async function loadBPCSource() {
-  const localFile = process.env.BPC_SOURCE_FILE;
+  const localFile = process.env.SOURCE_FILE;
   if (localFile) {
     const localPath = path.resolve(localFile);
     return {
@@ -59,18 +50,10 @@ async function loadBPCSource() {
     };
   }
 
-  if (process.env.BPC_SOURCE === 'local') {
-    return {
-      text: loadLocalBPC(),
-      source: path.resolve(BPC_FILE),
-      version: null,
-    };
-  }
-
-  const manifestURL = process.env.BPC_MANIFEST_URL || process.env.RULESET_URL || loadWranglerRulesetURL();
+  const manifestURL = process.env.MANIFEST_URL || loadWranglerManifestURL();
   if (!manifestURL) {
     throw new Error(
-      'Missing BPC manifest URL. Set BPC_MANIFEST_URL or RULESET_URL, or define RULESET_URL in wrangler.toml.',
+      'Missing manifest URL. Set MANIFEST_URL or define MANIFEST_URL in wrangler.jsonc.',
     );
   }
 

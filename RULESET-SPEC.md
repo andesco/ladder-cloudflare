@@ -1,6 +1,6 @@
-# Bypasser Ruleset Spec
+# Ladderflare Ruleset Spec
 
-Bypasser is a rules-driven proxy. Rules are JSON objects loaded from KV (`CONFIG_KV`) and applied by the Worker runtime.
+Ladderflare is a rules-driven proxy. Rules are JSON objects loaded from KV (`CONFIG_KV`) and applied by the Worker runtime.
 The active ruleset is built from BPC source data plus Ladder YAML overlays merged at update time.
 
 ## Lifecycle: Request -> Response
@@ -116,4 +116,4 @@ Unknown fields are ignored.
 - Ruleset mode key: `bpc:ruleset_bpc:mode` (`bpc+ladder-v3`).
 - Scheduled updates fetch BPC manifest data and merge Ladder YAML overlays before writing KV.
 - If no rules are available and bootstrap update fails, request handling returns `503 Ruleset unavailable`.
-- Scheduled updates populate KV from `RULESET_URL` manifest.
+- Scheduled updates populate KV from `MANIFEST_URL`.

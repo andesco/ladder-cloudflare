@@ -1,24 +1,24 @@
 <p align="center">
-  <img src="public/ladder.svg" width="100" alt="Bypasser logo">
+  <img src="public/ladder.svg" width="100" alt="Ladderflare logo">
 </p>
 
-<h1 align="center">Bypasser</h1>
+<h1 align="center">Ladderflare</h1>
 
-Bypasser is a Cloudflare Worker proxy that applies BPC-derived rules with Ladder YAML overlays at the edge.
+Ladderflare is a Cloudflare Worker proxy that applies BPC-derived rules with Ladder YAML overlays at the edge.
 
 ## Runtime Model
 
 - Pure JavaScript Worker runtime (no Go, no WebAssembly).
 - Rules are loaded from KV at runtime (`CONFIG_KV`).
 - Scheduled updates fetch `manifest.json`, map `sites_aggregated.js`, merge in Ladder YAML overlays, and store the merged rules in KV.
-- Local builds use `BPC_MANIFEST_URL`, `RULESET_URL`, or the `RULESET_URL` value in `wrangler.toml`; set `BPC_SOURCE=local` or `BPC_SOURCE_FILE=/path/to/sites_aggregated.json` for offline builds.
+- Local builds use `MANIFEST_URL` or the `MANIFEST_URL` value in `wrangler.jsonc`; set `SOURCE_FILE=/path/to/sites_aggregated.json` for offline builds.
 
 ## Deploy
 
 ### Worker Identity
 
-- Worker name: `bypasser`
-- Custom domain: `bypasser.example.com`
+- Worker name: `ladderflare`
+- Custom domain: `ladderflare.example.com`
 
 ### CLI
 
@@ -32,12 +32,12 @@ wrangler deploy
 
 ## Configuration
 
-Set these in `wrangler.toml` or Cloudflare dashboard:
+Set these in `wrangler.jsonc` or Cloudflare dashboard:
 
 - `CONFIG_KV` (required): KV namespace binding for ruleset state
-- `RULESET_URL` (required for updates): manifest URL (for example `https://bypass.example.com/manifest.json`)
+- `MANIFEST_URL` (required for updates): manifest URL (for example `https://bypass.example.com/manifest.json`)
 - `EXPOSE_RULESET` (`true`/`false`)
-- `USERPASS` (`username:password`)
+- `BASIC_AUTH` (`username:password`)
 - `USER_AGENT`
 - `X_FORWARDED_FOR`
 - `ALLOWED_DOMAINS`
@@ -94,4 +94,4 @@ npm run dev:local
 - Ladder YAML is not exposed as `/yaml/*`; it is compiled into overlay JSON and merged into runtime rules.
 - Static UI assets continue to be served from `public/`.
 
-Bypasser is licensed under the MIT License.
+Ladderflare is licensed under the MIT License.

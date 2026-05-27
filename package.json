@@ -1,16 +1,16 @@
 {
-  "name": "bypasser",
+  "name": "ladderflare",
   "version": "0.0.1",
-  "description": "Bypasser - BPC-powered HTTP proxy on Cloudflare Workers",
+  "description": "Ladderflare - BPC-powered HTTP proxy on Cloudflare Workers",
   "type": "module",
   "main": "index.js",
   "scripts": {
     "build:rules": "node scripts/build-rules.js",
     "build": "npm run build:rules",
     "deploy": "npm run build && wrangler deploy",
-    "deploy:local": "npm run build && wrangler deploy --config wrangler.local.toml",
+    "deploy:local": "npm run build && wrangler deploy --config wrangler.local.jsonc",
     "dev": "wrangler dev",
-    "dev:local": "wrangler dev --local --config wrangler.local.toml",
+    "dev:local": "wrangler dev --local --config wrangler.local.jsonc",
     "test": "node --test tests/*.test.mjs"
   },
   "author": "Andrew Escobar",

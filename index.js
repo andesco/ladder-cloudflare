@@ -1,5 +1,5 @@
 /**
- * Bypasser - Cloudflare Worker runtime (BPC + Ladder overlays, no WASM)
+ * Ladderflare - Cloudflare Worker runtime (BPC + Ladder overlays, no WASM)
  */
 
 import {
@@ -368,8 +368,8 @@ async function fetchRawContent(targetURL, requestHeaders, env) {
 }
 
 function checkBasicAuth(request, env) {
-  const userpass = env.USERPASS;
-  if (!userpass) {
+  const basicAuth = env.BASIC_AUTH;
+  if (!basicAuth) {
     return true;
   }
 
@@ -380,7 +380,7 @@ function checkBasicAuth(request, env) {
 
   try {
     const decoded = atob(authHeader.substring(6));
-    return decoded === userpass;
+    return decoded === basicAuth;
   } catch {
     return false;
   }
@@ -418,7 +418,7 @@ function isDomainAllowed(url, env) {
 
 async function updateBpcFromManifest(env) {
   const kv = env?.CONFIG_KV;
-  const manifestURL = env?.RULESET_URL;
+  const manifestURL = env?.MANIFEST_URL;
   if (!kv || !manifestURL) {
     return false;
   }
@@ -561,7 +561,7 @@ export default {
         return new Response('Unauthorized', {
           status: 401,
           headers: {
-            'WWW-Authenticate': 'Basic realm="Bypasser"',
+            'WWW-Authenticate': 'Basic realm="Ladderflare"',
             'Content-Type': 'text/plain',
           },
         });
