@@ -145,5 +145,9 @@ export function buildFetchInstructions(targetURL, rules, env = {}) {
     fetchInstructions.extraHeaders = rule.extraHeaders;
   }
 
+  if (rule.cookiePolicy && typeof rule.cookiePolicy === 'object') {
+    fetchInstructions.cookiePolicy = rule.cookiePolicy;
+  }
+
   return fetchInstructions;
 }

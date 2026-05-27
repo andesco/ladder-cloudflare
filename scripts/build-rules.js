@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
-const fs = require('fs');
-const path = require('path');
-const yaml = require('yaml');
+import fs from 'node:fs';
+import path from 'node:path';
+import yaml from 'yaml';
 
 const BPC_FILE = 'sites_aggregated.js';
 const LADDER_FILE = 'ruleset-ladder.yaml';
@@ -27,6 +27,66 @@ function loadLocalBPC() {
     throw new Error(`Missing local BPC file '${BPC_FILE}' (expected at ${bpcPath})`);
   }
   return fs.readFileSync(bpcPath, 'utf-8');
+}
+
+async function fetchText(url, label) {
+  const response = await fetch(url, { cache: 'no-store' });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch ${label} from ${url}: HTTP ${response.status}`);
+  }
+  return response.text();
+}
+
+function loadWranglerRulesetURL() {
+  const wranglerPath = path.resolve('wrangler.toml');
+  if (!fs.existsSync(wranglerPath)) {
+    return '';
+  }
+
+  const raw = fs.readFileSync(wranglerPath, 'utf-8');
+  const match = raw.match(/^\s*RULESET_URL\s*=\s*["']([^"']+)["']/m);
+  return match?.[1] || '';
+}
+
+async function loadBPCSource() {
+  const localFile = process.env.BPC_SOURCE_FILE;
+  if (localFile) {
+    const localPath = path.resolve(localFile);
+    return {
+      text: fs.readFileSync(localPath, 'utf-8'),
+      source: localPath,
+      version: null,
+    };
+  }
+
+  if (process.env.BPC_SOURCE === 'local') {
+    return {
+      text: loadLocalBPC(),
+      source: path.resolve(BPC_FILE),
+      version: null,
+    };
+  }
+
+  const manifestURL = process.env.BPC_MANIFEST_URL || process.env.RULESET_URL || loadWranglerRulesetURL();
+  if (!manifestURL) {
+    throw new Error(
+      'Missing BPC manifest URL. Set BPC_MANIFEST_URL or RULESET_URL, or define RULESET_URL in wrangler.toml.',
+    );
+  }
+
+  const manifestText = await fetchText(manifestURL, 'ruleset manifest');
+  const manifest = JSON.parse(manifestText);
+  const entry = manifest?.sites_aggregated_json || manifest?.sites_aggregated_js;
+
+  if (!entry?.url || !entry?.version) {
+    throw new Error(`Manifest ${manifestURL} is missing sites_aggregated_json/sites_aggregated_js url/version`);
+  }
+
+  return {
+    text: await fetchText(entry.url, 'sites_aggregated ruleset'),
+    source: entry.url,
+    version: entry.version,
+  };
 }
 
 function loadLadderRules() {
@@ -58,9 +118,11 @@ async function main() {
   try {
     const mapper = await loadBpcMapper();
 
-    const bpcText = loadLocalBPC();
+    const bpcSource = await loadBPCSource();
+    const bpcText = bpcSource.text;
     const bpcData = mapper.parseSitesAggregatedText(bpcText);
-    console.log(`Loaded ${bpcData.length} BPC entries from ${BPC_FILE}`);
+    const versionSuffix = bpcSource.version ? ` version ${bpcSource.version}` : '';
+    console.log(`Loaded ${bpcData.length} BPC entries from ${bpcSource.source}${versionSuffix}`);
     mapper.validateBPCData(bpcData);
 
     const ladderRules = loadLadderRules();

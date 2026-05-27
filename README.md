@@ -11,6 +11,7 @@ Bypasser is a Cloudflare Worker proxy that applies BPC-derived rules with Ladder
 - Pure JavaScript Worker runtime (no Go, no WebAssembly).
 - Rules are loaded from KV at runtime (`CONFIG_KV`).
 - Scheduled updates fetch `manifest.json`, map `sites_aggregated.js`, merge in Ladder YAML overlays, and store the merged rules in KV.
+- Local builds use `BPC_MANIFEST_URL`, `RULESET_URL`, or the `RULESET_URL` value in `wrangler.toml`; set `BPC_SOURCE=local` or `BPC_SOURCE_FILE=/path/to/sites_aggregated.json` for offline builds.
 
 ## Deploy
 
@@ -49,6 +50,7 @@ Set these in `wrangler.toml` or Cloudflare dashboard:
 - `GET /raw/{URL}`: raw proxied response
 - `GET /api/{URL}`: JSON payload with response body + request/response headers
 - `GET /ruleset`: current in-memory ruleset JSON (`EXPOSE_RULESET=true`)
+- `GET /status`: loaded ruleset version, update status, and source manifest details
 - `GET /test`: redirect to a random test URL from active rules
 
 Deprecated endpoints:
@@ -59,17 +61,20 @@ Deprecated endpoints:
 ## Request Processing
 
 1. Resolve target URL from request path.
-2. Match first rule by host + optional `paths` and `pathExclusions`.
+2. Match best rule by host specificity (exact host, then longest suffix) + optional `paths` and `pathExclusions`.
 3. Build fetch instructions (`urlMods`, headers, `randomIP`, `extraHeaders`, `googleCache`).
 4. Fetch origin content.
 5. For HTML responses, apply transforms in order:
    - `regexRules`
    - script/style blocking (`blockScripts`, `blockScriptsGeneral`, global patterns)
    - inline script blocking (`blockJsInline`)
+   - `contentExtraction`
+   - archive fallback (`archiveFallback`)
    - `csCode` operations
    - `ampUnhide`
    - proxy URL rewrites (`src`/`href`/`action`, CSS `url()`)
    - `injections`
+   - external article links (`externalLink`)
    - `clearStorage`
 
 ## Build Commands

@@ -17,6 +17,7 @@ import {
   BPC_KV_SITES_VERSION_KEY,
   BPC_KV_VERSION_KEY,
   getRulesetDomains,
+  getRulesetStats,
   isRulesetLoaded,
   loadRulesetFromKV,
   maybeRefreshRulesetFromKV,
@@ -40,7 +41,8 @@ const MIME_TYPES = {
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
 const DEFAULT_X_FORWARDED_FOR = '66.249.66.1';
 const BPC_KV_RULESET_MODE_KEY = 'bpc:ruleset_bpc:mode';
-const BPC_RULESET_MODE = 'bpc+ladder-v2';
+const BPC_KV_LAST_UPDATE_KEY = 'bpc:ruleset_bpc:last_update';
+const BPC_RULESET_MODE = 'bpc+ladder-v3';
 
 let bootstrapAttempted = false;
 
@@ -93,6 +95,67 @@ function copyResponseHeaders(response) {
   return headers;
 }
 
+function getCookieName(setCookieValue) {
+  const firstPart = String(setCookieValue || '').split(';')[0] || '';
+  const separatorIndex = firstPart.indexOf('=');
+  return separatorIndex > -1 ? firstPart.slice(0, separatorIndex).trim() : '';
+}
+
+function shouldKeepSetCookie(setCookieValue, cookiePolicy) {
+  if (!cookiePolicy || typeof cookiePolicy !== 'object') {
+    return true;
+  }
+
+  const cookieName = getCookieName(setCookieValue);
+  if (!cookieName) {
+    return true;
+  }
+
+  if (Array.isArray(cookiePolicy.hold) && cookiePolicy.hold.length > 0) {
+    return cookiePolicy.hold.includes(cookieName);
+  }
+
+  if (cookiePolicy.removeAll) {
+    return false;
+  }
+
+  if (Array.isArray(cookiePolicy.drop) && cookiePolicy.drop.includes(cookieName)) {
+    return false;
+  }
+
+  return true;
+}
+
+function copyFilteredResponseHeaders(response, cookiePolicy) {
+  const headers = {};
+  response.headers.forEach((value, key) => {
+    if (key.toLowerCase() === 'set-cookie' && !shouldKeepSetCookie(value, cookiePolicy)) {
+      return;
+    }
+    headers[key] = value;
+  });
+  return headers;
+}
+
+function filterProxiedHTMLHeaders(headers) {
+  const output = {};
+  for (const [key, value] of Object.entries(headers || {})) {
+    const normalized = key.toLowerCase();
+    if (
+      normalized === 'content-length' ||
+      normalized === 'content-encoding' ||
+      normalized === 'transfer-encoding' ||
+      normalized === 'content-type' ||
+      normalized === 'cache-control' ||
+      normalized === 'content-security-policy'
+    ) {
+      continue;
+    }
+    output[key] = value;
+  }
+  return output;
+}
+
 function headersObjectToList(headersObj) {
   const list = [];
   if (!headersObj || typeof headersObj !== 'object') {
@@ -107,6 +170,52 @@ function headersObjectToList(headersObj) {
   }
 
   return list;
+}
+
+function getArchiveURL(targetURL) {
+  try {
+    const parsed = new URL(targetURL);
+    parsed.hash = '';
+    parsed.search = '';
+    return `https://archive.is/${parsed.toString()}`;
+  } catch {
+    return '';
+  }
+}
+
+async function fetchArchiveHTML(targetURL, rule, outboundHeaders) {
+  if (!rule?.archiveFallback) {
+    return null;
+  }
+
+  const archiveURL = getArchiveURL(targetURL);
+  if (!archiveURL) {
+    return null;
+  }
+
+  try {
+    const response = await fetch(archiveURL, {
+      headers: outboundHeaders,
+      cf: {
+        cacheTtl: 300,
+        cacheEverything: true,
+      },
+    });
+
+    if (!response.ok) {
+      return { archiveURL, archiveHTML: '' };
+    }
+
+    const contentType = response.headers.get('Content-Type') || '';
+    if (!contentType.includes('text/html') && !contentType.includes('application/xhtml+xml')) {
+      return { archiveURL, archiveHTML: '' };
+    }
+
+    return { archiveURL, archiveHTML: await response.text() };
+  } catch (error) {
+    console.error('Archive fallback fetch failed:', error?.message || String(error));
+    return { archiveURL, archiveHTML: '' };
+  }
 }
 
 async function fetchProxiedContent(targetURL, requestHeaders, env) {
@@ -131,7 +240,7 @@ async function fetchProxiedContent(targetURL, requestHeaders, env) {
       outboundHeaders['X-Forwarded-For'] = fetchInstructions.xForwardedFor;
     }
 
-    if (fetchInstructions.cookie) {
+    if (fetchInstructions.cookie && !fetchInstructions.cookiePolicy?.removeAll) {
       outboundHeaders.Cookie = fetchInstructions.cookie;
     }
 
@@ -158,7 +267,7 @@ async function fetchProxiedContent(targetURL, requestHeaders, env) {
     }
 
     const contentType = response.headers.get('Content-Type') || '';
-    const originHeaders = copyResponseHeaders(response);
+    const originHeaders = copyFilteredResponseHeaders(response, fetchInstructions.cookiePolicy);
 
     const isHtml = contentType.includes('text/html') || contentType.includes('application/xhtml+xml');
     if (!isHtml) {
@@ -187,7 +296,8 @@ async function fetchProxiedContent(targetURL, requestHeaders, env) {
     }
 
     const html = await response.text();
-    const processed = processHTMLContent(html, targetURL, fetchInstructions.rule);
+    const archiveResult = await fetchArchiveHTML(targetURL, fetchInstructions.rule, outboundHeaders);
+    const processed = processHTMLContent(html, targetURL, fetchInstructions.rule, archiveResult || {});
     const responseHeaders = {
       'Content-Type': response.headers.get('Content-Type') || 'text/html',
       'Cache-Control': 'public, max-age=300',
@@ -201,7 +311,10 @@ async function fetchProxiedContent(targetURL, requestHeaders, env) {
     return {
       status: 200,
       body: processed.content,
-      headers: responseHeaders,
+      headers: {
+        ...filterProxiedHTMLHeaders(originHeaders),
+        ...responseHeaders,
+      },
       requestHeaders: outboundHeaders,
       originHeaders,
     };
@@ -310,6 +423,20 @@ async function updateBpcFromManifest(env) {
     return false;
   }
 
+  async function writeUpdateStatus(status) {
+    try {
+      await kv.put(
+        BPC_KV_LAST_UPDATE_KEY,
+        JSON.stringify({
+          checkedAt: new Date().toISOString(),
+          ...status,
+        }),
+      );
+    } catch (error) {
+      console.error('BPC update: failed to store update status:', error?.message || String(error));
+    }
+  }
+
   let manifest;
   try {
     const resp = await fetch(manifestURL, { cf: { cacheTtl: 0, cacheEverything: false } });
@@ -319,6 +446,7 @@ async function updateBpcFromManifest(env) {
     manifest = await resp.json();
   } catch (error) {
     console.error('BPC update: failed to fetch/parse manifest:', error?.message || String(error));
+    await writeUpdateStatus({ ok: false, error: error?.message || String(error), phase: 'manifest' });
     return false;
   }
 
@@ -332,6 +460,7 @@ async function updateBpcFromManifest(env) {
   const sitesURL = entry?.url;
   if (!nextVersion || !sitesURL) {
     console.error('BPC update: manifest missing sites_aggregated_json/sites_aggregated_js version/url');
+    await writeUpdateStatus({ ok: false, error: 'manifest missing sites_aggregated entry', phase: 'manifest' });
     return false;
   }
 
@@ -345,6 +474,7 @@ async function updateBpcFromManifest(env) {
     currentRulesJSON &&
     currentRulesetMode === BPC_RULESET_MODE
   ) {
+    await writeUpdateStatus({ ok: true, changed: false, version: nextVersion });
     return false;
   }
 
@@ -357,6 +487,7 @@ async function updateBpcFromManifest(env) {
     sitesText = await resp.text();
   } catch (error) {
     console.error('BPC update: failed to fetch sites_aggregated payload:', error?.message || String(error));
+    await writeUpdateStatus({ ok: false, error: error?.message || String(error), phase: 'ruleset_fetch', version: nextVersion });
     return false;
   }
 
@@ -366,6 +497,7 @@ async function updateBpcFromManifest(env) {
     validateBPCData(bpcData);
   } catch (error) {
     console.error('BPC update: refusing to update due to parse/validate failure:', error?.message || String(error));
+    await writeUpdateStatus({ ok: false, error: error?.message || String(error), phase: 'ruleset_parse', version: nextVersion });
     return false;
   }
 
@@ -374,6 +506,7 @@ async function updateBpcFromManifest(env) {
     mergedRuleset = buildMergedRuleset(bpcData, ladderRules);
   } catch (error) {
     console.error('BPC update: failed to build merged ruleset:', error?.message || String(error));
+    await writeUpdateStatus({ ok: false, error: error?.message || String(error), phase: 'ruleset_build', version: nextVersion });
     return false;
   }
 
@@ -385,6 +518,7 @@ async function updateBpcFromManifest(env) {
   await kv.put(BPC_KV_VERSION_KEY, nextVersion);
   await kv.put(BPC_KV_RULESET_MODE_KEY, BPC_RULESET_MODE);
   await kv.put(BPC_KV_MANIFEST_KEY, JSON.stringify(manifest));
+  await writeUpdateStatus({ ok: true, changed: true, version: nextVersion, rules: mergedRuleset.length });
 
   console.log('BPC update: stored sites_aggregated.js + merged ruleset in KV version:', nextVersion);
   return true;
@@ -475,6 +609,27 @@ export default {
           });
         }
 
+      }
+
+      if (pathname === '/status') {
+        const [lastUpdate, manifest] = await Promise.all([
+          env.CONFIG_KV?.get(BPC_KV_LAST_UPDATE_KEY),
+          env.CONFIG_KV?.get(BPC_KV_MANIFEST_KEY),
+        ]);
+        const payload = {
+          version: env.VERSION || '0.0.0',
+          rulesetMode: BPC_RULESET_MODE,
+          ruleset: getRulesetStats(),
+          lastUpdate: lastUpdate ? JSON.parse(lastUpdate) : null,
+          manifest: manifest ? JSON.parse(manifest) : null,
+        };
+        return new Response(JSON.stringify(payload, null, 2), {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+          },
+        });
       }
 
       const routeResult = handleRequest(method, pathWithQuery, toHeaderMap(request.headers));
