@@ -10,6 +10,13 @@ import {
 import ladderRules from './src/runtime/ladder-rules.generated.js';
 
 import { handleRequest, getFetchInstructions, processHTMLContent } from './src/runtime/engine.js';
+import { fetchKitesurfContent } from './src/runtime/browser-renderer.js';
+import { getBrowserGapForURL } from './src/runtime/browser-gaps.js';
+import { applyDeployIdentity, getDeployIdentity } from './src/runtime/deploy-identity.js';
+import {
+  findAmpRedirectURL,
+  getJSONExtractionRequest,
+} from './src/runtime/content-processor.js';
 import {
   BPC_KV_MANIFEST_KEY,
   BPC_KV_RULESET_KEY,
@@ -40,9 +47,14 @@ const MIME_TYPES = {
 
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
 const DEFAULT_X_FORWARDED_FOR = '66.249.66.1';
+const MAX_HTML_BYTES = 12 * 1024 * 1024;
+const MAX_JSON_BYTES = 4 * 1024 * 1024;
 const BPC_KV_RULESET_MODE_KEY = 'bpc:ruleset_bpc:mode';
 const BPC_KV_LAST_UPDATE_KEY = 'bpc:ruleset_bpc:last_update';
-const BPC_RULESET_MODE = 'bpc+ladder-v3';
+// v4 adds browser execution metadata and forces existing KV installations to
+// rebuild their rules instead of silently retaining v3 rules without `bpc`
+// markers or cs_local inputs.
+const BPC_RULESET_MODE = 'bpc+ladder-v4';
 
 let bootstrapAttempted = false;
 
@@ -58,6 +70,30 @@ function applyCORSHeaders(headers) {
   headers.set('Access-Control-Allow-Origin', '*');
   headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   headers.set('Access-Control-Allow-Headers', '*');
+}
+
+function browserGapResponse(targetURL, gap) {
+  const reasons = Array.isArray(gap?.reasons) ? gap.reasons : [];
+  const payload = {
+    error: 'browser_compatibility_gap',
+    message: 'This domain is temporarily blocked because the active BPC rule has a known or potential browser compatibility gap.',
+    targetURL,
+    host: gap?.host || '',
+    reasons,
+    descriptions: Array.isArray(gap?.descriptions) ? gap.descriptions : [],
+  };
+
+  return new Response(JSON.stringify(payload, null, 2), {
+    status: 501,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-Ladderflare-Browser-Gap': reasons.join(','),
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': '*',
+    },
+  });
 }
 
 async function serveStaticAsset(pathname, env) {
@@ -93,6 +129,30 @@ function copyResponseHeaders(response) {
     headers[key] = value;
   });
   return headers;
+}
+
+async function readBoundedText(response, maxBytes, label) {
+  const declaredLength = Number(response.headers.get('Content-Length'));
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    throw new Error(`${label} exceeds ${maxBytes} bytes`);
+  }
+  if (!response.body) return '';
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let text = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel(`${label} exceeds ${maxBytes} bytes`);
+      throw new Error(`${label} exceeds ${maxBytes} bytes`);
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  return text + decoder.decode();
 }
 
 function getCookieName(setCookieValue) {
@@ -195,7 +255,7 @@ async function fetchArchiveHTML(targetURL, rule, outboundHeaders) {
 
   try {
     const response = await fetch(archiveURL, {
-      headers: outboundHeaders,
+      headers: secondaryFetchHeaders(outboundHeaders, 'text/html,application/xhtml+xml'),
       cf: {
         cacheTtl: 300,
         cacheEverything: true,
@@ -211,10 +271,55 @@ async function fetchArchiveHTML(targetURL, rule, outboundHeaders) {
       return { archiveURL, archiveHTML: '' };
     }
 
-    return { archiveURL, archiveHTML: await response.text() };
+    return { archiveURL, archiveHTML: await readBoundedText(response, MAX_HTML_BYTES, 'archive HTML') };
   } catch (error) {
     console.error('Archive fallback fetch failed:', error?.message || String(error));
     return { archiveURL, archiveHTML: '' };
+  }
+}
+
+function secondaryFetchHeaders(outboundHeaders, accept) {
+  const headers = {
+    Accept: accept,
+  };
+  for (const key of ['User-Agent', 'Accept-Language', 'DNT']) {
+    if (outboundHeaders[key]) headers[key] = outboundHeaders[key];
+  }
+  return headers;
+}
+
+async function fetchAmpHTML(ampURL, outboundHeaders) {
+  if (!ampURL) return '';
+  try {
+    const response = await fetch(ampURL, {
+      headers: secondaryFetchHeaders(outboundHeaders, 'text/html,application/xhtml+xml'),
+      cf: { cacheTtl: 300, cacheEverything: true },
+    });
+    const contentType = response.headers.get('Content-Type') || '';
+    if (!response.ok || (!contentType.includes('text/html') && !contentType.includes('application/xhtml+xml'))) {
+      return '';
+    }
+    return readBoundedText(response, MAX_HTML_BYTES, 'AMP HTML');
+  } catch (error) {
+    console.error('AMP redirect fetch failed:', error?.message || String(error));
+    return '';
+  }
+}
+
+async function fetchJSONExtractionPayload(html, targetURL, rule, outboundHeaders) {
+  const request = getJSONExtractionRequest(html, targetURL, rule?.contentExtraction);
+  if (!request) return '';
+
+  try {
+    const response = await fetch(request.url, {
+      headers: secondaryFetchHeaders(outboundHeaders, 'application/json'),
+      cf: { cacheTtl: 300, cacheEverything: true },
+    });
+    if (!response.ok) return '';
+    return readBoundedText(response, MAX_JSON_BYTES, 'JSON article response');
+  } catch (error) {
+    console.error('JSON article fetch failed:', error?.message || String(error));
+    return '';
   }
 }
 
@@ -295,9 +400,21 @@ async function fetchProxiedContent(targetURL, requestHeaders, env) {
       };
     }
 
-    const html = await response.text();
-    const archiveResult = await fetchArchiveHTML(targetURL, fetchInstructions.rule, outboundHeaders);
-    const processed = processHTMLContent(html, targetURL, fetchInstructions.rule, archiveResult || {});
+    let html = await readBoundedText(response, MAX_HTML_BYTES, 'origin HTML');
+    const ampURL = findAmpRedirectURL(html, targetURL, fetchInstructions.rule?.ampRedirect);
+    if (ampURL) {
+      const ampHTML = await fetchAmpHTML(ampURL, outboundHeaders);
+      if (ampHTML) html = ampHTML;
+    }
+
+    const [archiveResult, jsonURLPayload] = await Promise.all([
+      fetchArchiveHTML(targetURL, fetchInstructions.rule, outboundHeaders),
+      fetchJSONExtractionPayload(html, ampURL || targetURL, fetchInstructions.rule, outboundHeaders),
+    ]);
+    const processed = processHTMLContent(html, targetURL, fetchInstructions.rule, {
+      ...(archiveResult || {}),
+      jsonURLPayload,
+    });
     const responseHeaders = {
       'Content-Type': response.headers.get('Content-Type') || 'text/html',
       'Cache-Control': 'public, max-age=300',
@@ -549,9 +666,7 @@ async function ensureRulesetAvailable(env) {
   return isRulesetLoaded();
 }
 
-export default {
-  async fetch(request, env, ctx) {
-    try {
+async function handleFetch(request, env, ctx) {
       const url = new URL(request.url);
       const pathname = url.pathname;
       const pathWithQuery = pathname + url.search;
@@ -590,6 +705,15 @@ export default {
         return new Response(null, { status: 204, headers });
       }
 
+      if (pathname === '/health') {
+        const headers = new Headers({
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Cache-Control': 'no-store',
+        });
+        applyCORSHeaders(headers);
+        return new Response('ok', { status: 200, headers });
+      }
+
       if (pathname === '/ruleset' && env.EXPOSE_RULESET === 'false') {
         return new Response('Not Found', {
           status: 404,
@@ -618,6 +742,7 @@ export default {
         ]);
         const payload = {
           version: env.VERSION || '0.0.0',
+          deploy: getDeployIdentity(env),
           rulesetMode: BPC_RULESET_MODE,
           ruleset: getRulesetStats(),
           lastUpdate: lastUpdate ? JSON.parse(lastUpdate) : null,
@@ -657,9 +782,24 @@ export default {
         });
       }
 
+      // Rules-applied routes must not silently return a partial BPC result for
+      // domains with an identified browser compatibility gap. The explicit
+      // FastHTTP raw route remains available as an unmodified diagnostic fetch.
+      if (['browser', 'browser-api', 'browser-raw', 'fast', 'fast-api'].includes(routeResult.responseType)) {
+        const browserGap = getBrowserGapForURL(routeResult.targetURL);
+        if (browserGap) {
+          return browserGapResponse(routeResult.targetURL, browserGap);
+        }
+      }
+
+      const usesKitesurf = ['browser', 'browser-api', 'browser-raw'].includes(routeResult.responseType);
+      const isAPI = ['browser-api', 'fast-api'].includes(routeResult.responseType);
+
       const proxyResult =
-        routeResult.responseType === 'raw'
+        routeResult.responseType === 'fast-raw'
           ? await fetchRawContent(routeResult.targetURL, request.headers, env)
+          : usesKitesurf
+            ? await fetchKitesurfContent(routeResult.targetURL, getFetchInstructions(routeResult.targetURL, env), env)
           : await fetchProxiedContent(routeResult.targetURL, request.headers, env);
 
       const responseHeaders = new Headers();
@@ -671,13 +811,18 @@ export default {
         }
       }
 
-      if (routeResult.responseType === 'api') {
+      if (isAPI) {
         const content =
           typeof proxyResult.body === 'string'
             ? proxyResult.body
             : proxyResult.body
               ? await new Response(proxyResult.body).text()
               : '';
+
+        const responseHeadersForAPI =
+          proxyResult.originHeaders && Object.keys(proxyResult.originHeaders).length > 0
+            ? proxyResult.originHeaders
+            : proxyResult.headers;
 
         const apiPayload = {
           version: env.VERSION || '0.0.0',
@@ -686,7 +831,7 @@ export default {
             headers: headersObjectToList(proxyResult.requestHeaders),
           },
           response: {
-            headers: headersObjectToList(proxyResult.originHeaders),
+            headers: headersObjectToList(responseHeadersForAPI),
           },
         };
 
@@ -702,15 +847,24 @@ export default {
         status: proxyResult.status || 200,
         headers: responseHeaders,
       });
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    try {
+      return applyDeployIdentity(await handleFetch(request, env, ctx), env);
     } catch (error) {
       console.error('Worker error:', error);
-      return new Response(`Worker error: ${error.message}`, {
-        status: 500,
-        headers: {
-          'Content-Type': 'text/plain',
-          'Access-Control-Allow-Origin': '*',
-        },
-      });
+      return applyDeployIdentity(
+        new Response(`Worker error: ${error.message}`, {
+          status: 500,
+          headers: {
+            'Content-Type': 'text/plain',
+            'Access-Control-Allow-Origin': '*',
+          },
+        }),
+        env,
+      );
     }
   },
 

@@ -9,7 +9,9 @@ The active ruleset is built from BPC source data plus Ladder YAML overlays merge
 2. Match best rule by host specificity (exact host first, then longest suffix), optional `paths`, and optional `pathExclusions`.
 3. Build fetch instructions (`urlMods`, headers, `randomIP`, `extraHeaders`, `googleCache`).
 4. Fetch origin content.
-5. If response is HTML, apply transforms in this order:
+5. If configured and the paywall selector matches, fetch the declared AMP document.
+6. Fetch a same-origin JSON article endpoint when `contentExtraction.ldJsonUrl` requires it.
+7. If response is HTML, apply transforms in this order:
    1. `regexRules`
    2. `blockScripts` + `blockScriptsGeneral` + global `blockScriptsGeneral`
    3. `blockJsInline`
@@ -17,21 +19,25 @@ The active ruleset is built from BPC source data plus Ladder YAML overlays merge
    5. `archiveFallback`
    6. `csCode`
    7. `ampUnhide`
-   8. proxy URL rewrite (`src`, `href`, `action`, CSS `url()`)
+   8. proxy URL rewrite (`src`, `href`, `action`, including iframes, CSS `url()`)
    9. `injections`
    10. `externalLink`
-   11. `clearStorage`
-6. If `headers.content-security-policy` is set, response CSP is overridden.
+8. If `headers.content-security-policy` is set, response CSP is overridden.
 
 ## Route Surface
 
 Supported:
 
 - `/{URL}`
+- `/fast/{URL}`
 - `/raw/{URL}`
 - `/api/{URL}`
+- `/fast/raw/{URL}`
+- `/fast/api/{URL}`
+- `/browser/{URL}`
 - `/ruleset`
 - `/status`
+- `/health`
 - `/test`
 
 Deprecated:
@@ -44,6 +50,7 @@ Deprecated:
 Rules are JSON array entries with optional fields:
 
 - `domain` (string) or `domains` (string array)
+- `global` (boolean): global BPC `block_regex_general` carrier with no matchable domain
 - `paths` (string array): request path must start with one value
 - `pathExclusions` (string array): regex patterns; match means skip rule
 - `headers`:
@@ -69,7 +76,7 @@ Rules are JSON array entries with optional fields:
 - `blockScripts`
 - `blockScriptsGeneral`
 - `csCode` (`cond`, `hide_elem`, `rm_elem`, `rm_class`, `rm_attrib`, `set_attrib`, `add_style`)
-  - nested `elems` operations are applied inside each matched `cond` scope
+  - nested `elems` operations run document-wide after the parent `cond` matches, matching BPC semantics
 - `contentExtraction`:
   - `ldJson`
   - `ldJsonNext`
@@ -78,10 +85,14 @@ Rules are JSON array entries with optional fields:
 - `archiveFallback`: `{ selector }`; selector format is `paywallSelector|articleSelector|sourceSelector|archiveLinkSelector`
 - `externalLink`: `{ selector, type }`; selector format is `paywallSelector|articleSelector`, type is `archive.is` or `google_search_tool`
 - `ampUnhide`
+- `ampRedirect`: `paywallSelector|optionalAmpUrl`; supports `{path}` and `{host}` URL templates
 - `blockJsInline`
-- `clearStorage`
 
-Unknown fields are ignored.
+Browser execution metadata is retained on BPC rules as `bpc`, `allowCookies`, `csParam`, `csBlock`, `csClearLocalStorage`, and `csAllFrames`. The default `/{URL}`, `/browser/`, `/api/`, and `/raw/` routes consume these fields through Kitesurf: they run the vendored BPC core/local content scripts and supply a bounded `chrome.*` compatibility shim. `/fast/` and `/fast/api/` are explicit server-side routes and do not run browser scripts; `/fast/raw/` is the unmodified FastHTTP diagnostic route. `block_host_perm_add` remains Chrome host-permission metadata; `cs_dompurify` is implicit because extracted HTML is always sanitized; `upd_version` and `nofix` are metadata.
+
+The Kitesurf routes fail closed with HTTP `501` and error `browser_compatibility_gap` for the current audited 54-domain compatibility-gap union. `/fast/` and `/fast/api/` use the same gate; `/fast/raw/` bypasses rule processing and remains available for diagnostics.
+
+Unknown Ladder overlay fields are ignored. Unknown upstream BPC fields and `cs_code` operations reject a ruleset update so new upstream rule types cannot be silently dropped.
 
 ## Matching Semantics
 
@@ -113,7 +124,7 @@ Unknown fields are ignored.
 
 - Active rules are read from `CONFIG_KV` key `bpc:ruleset_bpc`.
 - Version key: `bpc:ruleset_bpc:version`.
-- Ruleset mode key: `bpc:ruleset_bpc:mode` (`bpc+ladder-v3`).
+- Ruleset mode key: `bpc:ruleset_bpc:mode` (`bpc+ladder-v4`).
 - Scheduled updates fetch BPC manifest data and merge Ladder YAML overlays before writing KV.
 - If no rules are available and bootstrap update fails, request handling returns `503 Ruleset unavailable`.
 - Scheduled updates populate KV from `MANIFEST_URL`.

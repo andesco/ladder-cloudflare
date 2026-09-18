@@ -62,15 +62,27 @@ export function routeRequest(method, pathWithQuery, headerMap, { rulesetJSON, te
   }
 
   const needsFetch = {
-    responseType: 'proxy',
+    responseType: 'browser',
     targetPath: pathWithQuery,
   };
 
-  if (pathname.startsWith('/api/')) {
-    needsFetch.responseType = 'api';
+  if (pathname.startsWith('/fast/api/')) {
+    needsFetch.responseType = 'fast-api';
+    needsFetch.targetPath = `/${pathname.slice('/fast/api/'.length)}${search}`;
+  } else if (pathname.startsWith('/fast/raw/')) {
+    needsFetch.responseType = 'fast-raw';
+    needsFetch.targetPath = `/${pathname.slice('/fast/raw/'.length)}${search}`;
+  } else if (pathname.startsWith('/api/')) {
+    needsFetch.responseType = 'browser-api';
     needsFetch.targetPath = `/${pathname.slice('/api/'.length)}${search}`;
+  } else if (pathname.startsWith('/browser/')) {
+    needsFetch.responseType = 'browser';
+    needsFetch.targetPath = `/${pathname.slice('/browser/'.length)}${search}`;
+  } else if (pathname.startsWith('/fast/')) {
+    needsFetch.responseType = 'fast';
+    needsFetch.targetPath = `/${pathname.slice('/fast/'.length)}${search}`;
   } else if (pathname.startsWith('/raw/')) {
-    needsFetch.responseType = 'raw';
+    needsFetch.responseType = 'browser-raw';
     needsFetch.targetPath = `/${pathname.slice('/raw/'.length)}${search}`;
   }
 

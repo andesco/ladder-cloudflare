@@ -19,6 +19,52 @@ const REFERER_TWITTER = 'https://t.co/x?amp=1';
 // instead of silently generating degraded rules.
 const KNOWN_BPC_USERAGENTS = new Set(['googlebot', 'bingbot', 'facebookbot']);
 const KNOWN_BPC_REFERER_TOKENS = new Set(['google', 'facebook', 'twitter']);
+const KNOWN_BPC_FIELDS = new Set([
+  'add_ext_link',
+  'add_ext_link_type',
+  'allow_cookies',
+  'amp_redirect',
+  'amp_unhide',
+  'block_host_perm_add',
+  'block_js_inline',
+  'block_regex',
+  'block_regex_general',
+  'cs_all_frames',
+  'cs_block',
+  'cs_clear_lclstrg',
+  'cs_code',
+  'cs_dompurify',
+  'cs_param',
+  'domain',
+  'exception',
+  'excluded_domains',
+  'headers_custom',
+  'ld_archive_is',
+  'ld_json',
+  'ld_json_next',
+  'ld_json_source',
+  'ld_json_url',
+  'nofix',
+  'random_ip',
+  'referer',
+  'referer_custom',
+  'remove_cookies',
+  'remove_cookies_select_drop',
+  'remove_cookies_select_hold',
+  'upd_version',
+  'useragent',
+  'useragent_custom',
+]);
+const KNOWN_CS_CODE_FIELDS = new Set([
+  'add_style',
+  'cond',
+  'elems',
+  'hide_elem',
+  'rm_attrib',
+  'rm_class',
+  'rm_elem',
+  'set_attrib',
+]);
 
 function looksLikeURL(value) {
   return typeof value === 'string' && /^https?:\/\//i.test(value);
@@ -79,6 +125,7 @@ export function validateBPCData(bpcData) {
     referer: new Map(), // value -> Set(domains)
     random_ip: new Map(), // value -> Set(domains)
     types: new Map(), // description -> Set(domains)
+    fields: new Map(), // field -> Set(domains)
   };
 
   function record(map, key, domain) {
@@ -89,6 +136,10 @@ export function validateBPCData(bpcData) {
   }
 
   function checkEntry(entry, domain, ctxLabel) {
+    for (const field of Object.keys(entry)) {
+      if (!KNOWN_BPC_FIELDS.has(field)) record(unknown.fields, field, domain);
+    }
+
     if (!domain || domain.startsWith('###') || domain.startsWith('#')) return;
 
     if (entry.useragent) {
@@ -112,6 +163,35 @@ export function validateBPCData(bpcData) {
       const v = entry.random_ip;
       const ok = v === 'eu' || v === true || v === 'true' || v === 'all';
       if (!ok) record(unknown.random_ip, v, domain);
+    }
+
+    let operations = entry.cs_code;
+    if (typeof operations === 'string') {
+      try {
+        operations = JSON.parse(operations);
+      } catch {
+        record(unknown.types, `invalid cs_code JSON (${ctxLabel})`, domain);
+        operations = null;
+      }
+    }
+    if (operations !== undefined && operations !== null && !Array.isArray(operations)) {
+      record(unknown.types, `cs_code type=${typeof operations} (${ctxLabel})`, domain);
+    }
+
+    function checkOperation(operation) {
+      if (!operation || typeof operation !== 'object' || Array.isArray(operation)) {
+        record(unknown.types, `cs_code operation type=${typeof operation} (${ctxLabel})`, domain);
+        return;
+      }
+      for (const field of Object.keys(operation)) {
+        if (!KNOWN_CS_CODE_FIELDS.has(field)) record(unknown.fields, `cs_code.${field}`, domain);
+      }
+      if (Array.isArray(operation.elems)) {
+        for (const child of operation.elems) checkOperation(child);
+      }
+    }
+    if (Array.isArray(operations)) {
+      for (const operation of operations) checkOperation(operation);
     }
   }
 
@@ -140,6 +220,9 @@ export function validateBPCData(bpcData) {
   if (unknown.types.size > 0) {
     lines.push(`- Unexpected BPC field types: ${[...unknown.types.keys()].sort().join(', ')}`);
   }
+  if (unknown.fields.size > 0) {
+    lines.push(`- Unknown BPC fields: ${[...unknown.fields.keys()].sort().join(', ')}`);
+  }
 
   if (lines.length === 0) return;
 
@@ -157,6 +240,9 @@ export function validateBPCData(bpcData) {
   for (const [val, domains] of unknown.types.entries()) {
     examples.push(`  ${val}: ${[...domains].join(', ')}`);
   }
+  for (const [val, domains] of unknown.fields.entries()) {
+    examples.push(`  field=${val}: ${[...domains].join(', ')}`);
+  }
 
   throw new Error(
     [
@@ -172,9 +258,23 @@ export function validateBPCData(bpcData) {
 // Map a single BPC entry to a Ladderflare rule object
 export function mapBPCEntry(entry) {
   const domain = entry.domain;
-  if (!domain || domain.startsWith('###') || domain.startsWith('#')) return null;
+  if (!domain) return null;
 
-  const rule = { domain };
+  if (domain.startsWith('###') || domain.startsWith('#')) {
+    if (!entry.block_regex_general) return null;
+    const patterns = Array.isArray(entry.block_regex_general)
+      ? entry.block_regex_general
+      : [entry.block_regex_general];
+    const excludedDomains = normalizeStringArray(entry.excluded_domains);
+    return {
+      global: true,
+      blockScriptsGeneral: patterns.map((pattern) =>
+        excludedDomains.length > 0 ? { pattern, excludedDomains } : pattern,
+      ),
+    };
+  }
+
+  const rule = { domain, bpc: true };
   const headers = {};
   let hasHeaders = false;
 
@@ -255,10 +355,11 @@ export function mapBPCEntry(entry) {
     addExtraHeaders(entry.headers_custom);
   }
 
-  // BPC uses cs_param for some fetch/header paths in Chromium-only rules.
-  // In Worker mode the closest equivalent is to send them as outbound headers.
+  // cs_param is input for BPC's site-specific content scripts, not a set of
+  // headers for the page request. The browser renderer passes it to the
+  // vendored BPC content-script compatibility layer.
   if (entry.cs_param && typeof entry.cs_param === 'object' && !Array.isArray(entry.cs_param)) {
-    addExtraHeaders(entry.cs_param);
+    rule.csParam = entry.cs_param;
   }
 
   if (hasHeaders) {
@@ -321,9 +422,9 @@ export function mapBPCEntry(entry) {
     rule.ampUnhide = true;
   }
 
-  // AMP redirect -> urlMods query
+  // Redirect to a declared AMP page when the configured paywall is present.
   if (entry.amp_redirect) {
-    rule.urlMods = { query: [{ key: 'amp', value: '1' }] };
+    rule.ampRedirect = entry.amp_redirect;
   }
 
   // Block inline JS
@@ -331,9 +432,20 @@ export function mapBPCEntry(entry) {
     rule.blockJsInline = entry.block_js_inline;
   }
 
-  // Clear local/session storage
+  // These fields are consumed only by the browser renderer. The rendered page
+  // has an isolated browser storage area, so clearing it is scoped to the
+  // disposable Kitesurf page rather than the caller's browser profile.
+  if (entry.cs_block) {
+    rule.csBlock = true;
+  }
   if (entry.cs_clear_lclstrg) {
-    rule.clearStorage = true;
+    rule.csClearLocalStorage = true;
+  }
+  if (entry.cs_all_frames) {
+    rule.csAllFrames = true;
+  }
+  if (entry.allow_cookies) {
+    rule.allowCookies = true;
   }
 
   const contentExtraction = {};
@@ -495,6 +607,8 @@ export function mergeRules(bpcRule, ladderRule) {
 export function cleanRule(rule) {
   const cleaned = {};
 
+  if (rule.global) cleaned.global = true;
+  if (rule.bpc) cleaned.bpc = true;
   if (rule.domain) cleaned.domain = rule.domain;
   if (rule.domains && rule.domains.length > 0) cleaned.domains = rule.domains;
   if (rule.paths && rule.paths.length > 0) cleaned.paths = rule.paths;
@@ -505,6 +619,11 @@ export function cleanRule(rule) {
 
   if (rule.extraHeaders && Object.keys(rule.extraHeaders).length > 0) cleaned.extraHeaders = rule.extraHeaders;
   if (rule.cookiePolicy && Object.keys(rule.cookiePolicy).length > 0) cleaned.cookiePolicy = rule.cookiePolicy;
+  if (rule.csParam && Object.keys(rule.csParam).length > 0) cleaned.csParam = rule.csParam;
+  if (rule.csBlock) cleaned.csBlock = true;
+  if (rule.csClearLocalStorage) cleaned.csClearLocalStorage = true;
+  if (rule.csAllFrames) cleaned.csAllFrames = true;
+  if (rule.allowCookies) cleaned.allowCookies = true;
   if (rule.contentExtraction && Object.keys(rule.contentExtraction).length > 0) cleaned.contentExtraction = rule.contentExtraction;
   if (rule.archiveFallback && Object.keys(rule.archiveFallback).length > 0) cleaned.archiveFallback = rule.archiveFallback;
   if (rule.externalLink && Object.keys(rule.externalLink).length > 0) cleaned.externalLink = rule.externalLink;
@@ -514,8 +633,8 @@ export function cleanRule(rule) {
   if (rule.blockScriptsGeneral && rule.blockScriptsGeneral.length > 0) cleaned.blockScriptsGeneral = rule.blockScriptsGeneral;
   if (rule.csCode && rule.csCode.length > 0) cleaned.csCode = rule.csCode;
   if (rule.ampUnhide) cleaned.ampUnhide = rule.ampUnhide;
+  if (rule.ampRedirect) cleaned.ampRedirect = rule.ampRedirect;
   if (rule.blockJsInline) cleaned.blockJsInline = rule.blockJsInline;
-  if (rule.clearStorage) cleaned.clearStorage = rule.clearStorage;
   if (rule.pathExclusions && rule.pathExclusions.length > 0) cleaned.pathExclusions = rule.pathExclusions;
 
   if (rule.regexRules && rule.regexRules.length > 0) cleaned.regexRules = rule.regexRules;

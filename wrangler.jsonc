@@ -3,7 +3,16 @@
   "name": "ladderflare",
   "main": "index.js",
   "compatibility_date": "2026-05-27",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   // "account_id": "", // optional: your unique Cloudflare account ID
+
+  "browser": {
+    "binding": "BROWSER"
+  },
+
+  "version_metadata": {
+    "binding": "CF_VERSION_METADATA"
+  },
 
   "workers_dev": true,
   "preview_urls": true,
@@ -11,6 +20,10 @@
   "routes": [
     {
       "pattern": "ladderflare.example.com",
+      "custom_domain": true
+    },
+    {
+      "pattern": "ladder.example.com",
       "custom_domain": true
     }
   ],

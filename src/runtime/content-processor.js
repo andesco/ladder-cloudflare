@@ -140,50 +140,62 @@ function parseExtractionSelectorSpec(spec) {
   };
 }
 
-function normalizeArticleText(value) {
-  if (Array.isArray(value)) {
-    return value.map(normalizeArticleText).filter(Boolean).join('\n\n');
-  }
-
-  if (typeof value === 'string') {
-    return value.trim();
-  }
-
-  return '';
+function parseContentExtractionSpec(spec) {
+  const parts = String(spec || '').split('|');
+  return {
+    paywallSelector: parts[0] || '',
+    articleSelector: parts[1] || '',
+    append: Boolean(parts[2]),
+    hold: Boolean(parts[3]),
+    articleIdSelector: parts[4] || '',
+    key: parts[5] || '',
+    restRoute: Boolean(parts[6]),
+  };
 }
 
-function findArticleTextInJSON(value, seen = new Set()) {
+function normalizeArticleContent(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => {
+        if (typeof item === 'string') return item;
+        if (!item || typeof item !== 'object') return '';
+        if (Array.isArray(item.children)) {
+          return item.children.map((child) => child?.text || child?.innerHTML || '').join('');
+        }
+        return item.text || item.innerHTML || '';
+      })
+      .filter(Boolean)
+      .join('<br><br>');
+  }
+
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function findArticleContentInJSON(value, preferredKeys, seen = new Set()) {
   if (!value || typeof value !== 'object' || seen.has(value)) {
     return '';
   }
 
   seen.add(value);
-
-  const direct =
-    normalizeArticleText(value.articleBody) ||
-    normalizeArticleText(value.text) ||
-    normalizeArticleText(value.description);
-  if (direct) {
-    return direct;
+  for (const key of preferredKeys) {
+    const direct = normalizeArticleContent(value[key]);
+    if (direct) return direct;
   }
 
   for (const child of Object.values(value)) {
-    if (Array.isArray(child)) {
-      for (const item of child) {
-        const found = findArticleTextInJSON(item, seen);
-        if (found) {
-          return found;
-        }
-      }
-    } else if (child && typeof child === 'object') {
-      const found = findArticleTextInJSON(child, seen);
-      if (found) {
-        return found;
-      }
+    if (child && typeof child === 'object') {
+      const found = findArticleContentInJSON(child, preferredKeys, seen);
+      if (found) return found;
     }
   }
 
   return '';
+}
+
+function getNestedValue(value, path) {
+  if (!value || typeof value !== 'object' || !path) return undefined;
+  if (Object.prototype.hasOwnProperty.call(value, path)) return value[path];
+  return path.split('.').reduce((current, key) => current?.[key], value);
 }
 
 function parseJSONScriptText(text) {
@@ -203,7 +215,18 @@ function extractArticleTextFromDocument(document, mode) {
   for (const selector of selectors) {
     for (const script of queryAllSafe(document, selector)) {
       const parsed = parseJSONScriptText(script.textContent);
-      const text = findArticleTextInJSON(parsed);
+      const text =
+        mode === 'next'
+          ? findArticleContentInJSON(parsed, [
+              'blocks',
+              'body',
+              'BodyPlainText',
+              'content',
+              'contentHtml',
+              'description',
+              'html',
+            ])
+          : findArticleContentInJSON(parsed, ['articleBody', 'text', 'description']);
       if (text) {
         return text;
       }
@@ -220,6 +243,130 @@ function articleTextToHTML(text) {
     .filter(Boolean)
     .map((paragraph) => `<p>${escapeHTML(paragraph)}</p>`)
     .join('\n');
+}
+
+function sanitizeExtractedHTML(value) {
+  const raw = String(value || '');
+  if (!raw.includes('<')) {
+    return articleTextToHTML(raw.replace(/(?:\\r)?\\n/g, '\n'));
+  }
+
+  let document;
+  try {
+    ({ document } = parseHTML(`<html><body><div id="bpc-extracted">${raw}</div></body></html>`));
+  } catch {
+    return articleTextToHTML(raw);
+  }
+
+  const root = document.querySelector('#bpc-extracted');
+  if (!root) return articleTextToHTML(raw);
+
+  for (const element of queryAllSafe(root, 'script,style,object,base,meta,link')) {
+    element.remove();
+  }
+
+  for (const element of queryAllSafe(root, '*')) {
+    for (const attribute of Array.from(element.attributes || [])) {
+      const name = String(attribute.name || '').toLowerCase();
+      const valueText = String(attribute.value || '').trim().toLowerCase();
+      if (
+        name.startsWith('on') ||
+        name === 'srcdoc' ||
+        (['href', 'src', 'xlink:href', 'action'].includes(name) &&
+          (valueText.startsWith('javascript:') || valueText.startsWith('data:text/html')))
+      ) {
+        element.removeAttribute(attribute.name);
+      }
+    }
+  }
+
+  return root.innerHTML;
+}
+
+function applyExtractedContent(document, spec, content, mode = '') {
+  const parsed = parseContentExtractionSpec(spec);
+  const sourceParts = String(spec || '').split('|');
+  const paywallSelector = parsed.paywallSelector;
+  const articleSelector = parsed.articleSelector;
+  const append = mode === 'ldJsonSource' ? Boolean(sourceParts[4]) : parsed.append;
+  const hold = mode === 'ldJsonSource' ? Boolean(sourceParts[5]) : parsed.hold;
+  if (!paywallSelector || !articleSelector || !content) return false;
+
+  const paywalls = queryAllSafe(document, paywallSelector);
+  const article = document.querySelector(articleSelector);
+  if (paywalls.length === 0 || !article) return false;
+
+  for (const paywall of paywalls) paywall.remove();
+  const safeHTML = sanitizeExtractedHTML(content);
+  if (!safeHTML) return false;
+
+  if (append || !article.parentNode) {
+    if (!hold) article.innerHTML = '';
+    article.insertAdjacentHTML('beforeend', `<div>${safeHTML}</div>`);
+  } else {
+    article.outerHTML = `<div style="margin:25px 0px">${safeHTML}</div>`;
+  }
+  return true;
+}
+
+function extractBalancedJSON(text, startIndex) {
+  const source = String(text || '');
+  let start = -1;
+  for (let index = Math.max(0, startIndex); index < source.length; index += 1) {
+    if (source[index] === '{' || source[index] === '[') {
+      start = index;
+      break;
+    }
+  }
+  if (start < 0) return '';
+
+  const stack = [];
+  let quote = '';
+  let escaped = false;
+  for (let index = start; index < source.length; index += 1) {
+    const char = source[index];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === '{' || char === '[') stack.push(char);
+    else if (char === '}' || char === ']') {
+      stack.pop();
+      if (stack.length === 0) return source.slice(start, index + 1);
+    }
+  }
+  return '';
+}
+
+function extractSourceJSONContent(document, spec) {
+  const parts = String(spec || '').split('|');
+  const filter = parts[2] || '';
+  const key = parts[3] || '';
+  if (!filter || !key) return '';
+
+  const normalizedFilter = filter.replace(/\s+/g, '');
+  for (const script of queryAllSafe(document, 'script:not([src])')) {
+    const text = String(script.textContent || '');
+    const normalizedText = text.replace(/\s+/g, '');
+    const normalizedIndex = normalizedText.indexOf(normalizedFilter);
+    if (normalizedIndex < 0) continue;
+
+    const filterStart = text.search(new RegExp(filter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace('=', '\\s*=\\s*')));
+    const jsonText = extractBalancedJSON(text, filterStart < 0 ? 0 : filterStart + filter.length);
+    if (!jsonText) continue;
+    try {
+      return normalizeArticleContent(getNestedValue(JSON.parse(jsonText), key));
+    } catch {
+      // Try the next matching script.
+    }
+  }
+  return '';
 }
 
 function strippedURL(value) {
@@ -300,44 +447,126 @@ function applyExternalLink(document, targetURL, externalLink) {
   insertHTMLBeforeFirstChildOrAppend(article, createExternalLinkHTML(externalLink.type, targetURL));
 }
 
-function applyJSONContentExtraction(document, extraction) {
+function parseExternalJSONContent(payload, key) {
+  if (typeof payload !== 'string' || !payload.trim()) return '';
+  try {
+    const json = JSON.parse(payload.replace(/<script>[\s\S]+<\/script>/g, ''));
+    const value = key ? getNestedValue(json, key) : getNestedValue(json, 'content.rendered');
+    return normalizeArticleContent(value);
+  } catch {
+    return '';
+  }
+}
+
+function applyJSONContentExtraction(document, extraction, options = {}) {
   if (!extraction || typeof extraction !== 'object') {
     return;
   }
 
-  const candidates = [
-    ['ldJsonNext', 'next'],
-    ['ldJson', 'ld'],
-    ['ldJsonUrl', 'ld'],
-    ['ldJsonSource', 'ld'],
-  ];
+  const candidates = ['ldJsonNext', 'ldJson', 'ldJsonSource', 'ldJsonUrl'];
 
-  for (const [key, mode] of candidates) {
+  for (const key of candidates) {
     if (typeof extraction[key] !== 'string' || extraction[key].length === 0) {
       continue;
     }
 
-    const text = extractArticleTextFromDocument(document, mode);
-    if (!text) {
-      continue;
+    let content = '';
+    if (key === 'ldJsonNext') content = extractArticleTextFromDocument(document, 'next');
+    else if (key === 'ldJson') content = extractArticleTextFromDocument(document, 'ld');
+    else if (key === 'ldJsonSource') content = extractSourceJSONContent(document, extraction[key]);
+    else if (key === 'ldJsonUrl') {
+      const { key: nestedKey } = parseContentExtractionSpec(extraction[key]);
+      content = parseExternalJSONContent(options.jsonURLPayload, nestedKey);
     }
 
-    const { paywallSelector, articleSelector } = parseExtractionSelectorSpec(extraction[key]);
-    const articleTargets = articleSelector ? queryAllSafe(document, articleSelector) : [];
-    const paywallTargets = paywallSelector ? queryAllSafe(document, paywallSelector) : [];
-    const target = articleTargets[0] || paywallTargets[0]?.parentElement || document.querySelector('article') || document.body;
+    if (applyExtractedContent(document, extraction[key], content, key)) return;
+  }
+}
 
-    if (!target) {
-      continue;
+export function findAmpRedirectURL(content, targetURL, ampRedirect) {
+  if (typeof ampRedirect !== 'string' || !ampRedirect) return '';
+
+  let document;
+  try {
+    ({ document } = parseHTML(String(content || '')));
+  } catch {
+    return '';
+  }
+
+  const [paywallSelector, configuredAmpURL = ''] = ampRedirect.split('|');
+  if (!paywallSelector || queryAllSafe(document, paywallSelector).length === 0) return '';
+
+  const ampScript = document.querySelector('script[src^="https://cdn.ampproject.org/"]');
+  const ampLink = document.querySelector('head > link[rel="amphtml"][href]');
+  if (ampScript && !ampLink && !configuredAmpURL) return '';
+
+  let ampURL = configuredAmpURL || ampLink?.getAttribute('href') || '';
+  if (!ampURL) return '';
+
+  try {
+    const current = new URL(targetURL);
+    ampURL = ampURL.replaceAll('{path}', current.pathname);
+    if (ampURL.includes('{host}')) {
+      ampURL = ampURL.replaceAll('{host}', current.hostname.replace(/^www\./, ''));
+      if (!/^https?:\/\//i.test(ampURL)) ampURL = `https://${ampURL}`;
     }
+    const resolved = new URL(ampURL, current);
+    return ['http:', 'https:'].includes(resolved.protocol) ? resolved.toString() : '';
+  } catch {
+    return '';
+  }
+}
 
-    target.innerHTML = articleTextToHTML(text);
-    for (const paywall of paywallTargets) {
-      if (paywall !== target) {
-        paywall.remove();
+export function getJSONExtractionRequest(content, targetURL, extraction) {
+  const spec = extraction?.ldJsonUrl;
+  if (typeof spec !== 'string' || !spec) return null;
+
+  let document;
+  try {
+    ({ document } = parseHTML(String(content || '')));
+  } catch {
+    return null;
+  }
+
+  const parsedSpec = parseContentExtractionSpec(spec);
+  if (
+    !parsedSpec.paywallSelector ||
+    !parsedSpec.articleSelector ||
+    queryAllSafe(document, parsedSpec.paywallSelector).length === 0 ||
+    !document.querySelector(parsedSpec.articleSelector)
+  ) {
+    return null;
+  }
+
+  let jsonURL = document
+    .querySelector('head > link[rel="alternate"][type="application/json"][href]')
+    ?.getAttribute('href');
+
+  if (!jsonURL && parsedSpec.articleIdSelector) {
+    const articleID = document
+      .querySelector(`${parsedSpec.articleIdSelector}[content]`)
+      ?.getAttribute('content');
+    if (articleID) {
+      try {
+        jsonURL = new URL(`/wp-json/wp/v2/posts/${encodeURIComponent(articleID)}`, targetURL).toString();
+      } catch {
+        return null;
       }
     }
-    return;
+  }
+
+  if (!jsonURL) return null;
+  try {
+    const target = new URL(targetURL);
+    const resolved = new URL(jsonURL, targetURL);
+    if (/^www\.autohebdo(?:f1)?\.\w{2,3}$/.test(resolved.hostname) && resolved.hostname !== target.hostname) {
+      resolved.hostname = target.hostname;
+    }
+    if (!['http:', 'https:'].includes(resolved.protocol) || resolved.hostname !== target.hostname) return null;
+    if (parsedSpec.restRoute) resolved.href = resolved.href.replace('/wp-json/', '/?rest_route=/');
+    return { url: resolved.toString() };
+  } catch {
+    return null;
   }
 }
 
@@ -536,7 +765,7 @@ function applyCsCodeOperation(document, op, scope = document) {
     }
 
     if (typeof op.rm_class === 'string' && op.rm_class.length > 0) {
-      const classes = op.rm_class.split(/\s+/).filter(Boolean);
+      const classes = op.rm_class.split(/[,|\s]+/).filter(Boolean);
       for (const element of condMatches) {
         for (const className of classes) {
           element.classList.remove(className);
@@ -545,8 +774,9 @@ function applyCsCodeOperation(document, op, scope = document) {
     }
 
     if (typeof op.rm_attrib === 'string' && op.rm_attrib.length > 0) {
+      const attributes = op.rm_attrib.split('|').map((value) => value.trim()).filter(Boolean);
       for (const element of condMatches) {
-        element.removeAttribute(op.rm_attrib);
+        for (const attribute of attributes) element.removeAttribute(attribute);
       }
     }
 
@@ -563,10 +793,11 @@ function applyCsCodeOperation(document, op, scope = document) {
   }
 
   if (Array.isArray(op.elems) && op.elems.length > 0) {
-    const childScopes = condMatches.length > 0 ? condMatches : [scope];
-    for (const childScope of childScopes) {
+    // BPC treats `elems` as follow-up document-wide operations once the
+    // parent condition matched; it is not a nested selector scope.
+    if (condMatches.length > 0 || !op.cond) {
       for (const childOp of op.elems) {
-        applyCsCodeOperation(document, childOp, childScope);
+        applyCsCodeOperation(document, childOp, document);
       }
     }
   }
@@ -601,6 +832,23 @@ function applyAmpUnhide(document) {
   for (const element of queryAllSafe(document, '[amp-access-hide]')) {
     element.removeAttribute('amp-access-hide');
   }
+
+  for (const element of queryAllSafe(document, 'amp-img[src]')) {
+    const image = document.createElement('img');
+    for (const attribute of Array.from(element.attributes || [])) {
+      image.setAttribute(attribute.name, attribute.value);
+    }
+    element.replaceWith(image);
+  }
+
+  for (const element of queryAllSafe(document, 'amp-iframe[src]')) {
+    const iframe = document.createElement('iframe');
+    for (const attribute of Array.from(element.attributes || [])) {
+      iframe.setAttribute(attribute.name, attribute.value);
+    }
+    iframe.setAttribute('width', iframe.getAttribute('width') || '100%');
+    element.replaceWith(iframe);
+  }
 }
 
 function rewriteSelectionAttr(element, attr, originalHost) {
@@ -619,6 +867,7 @@ function rewriteHTMLDocument(document, originalHost) {
   const rewrites = [
     ['img[src]', 'src'],
     ['script[src]', 'src'],
+    ['iframe[src]', 'src'],
     ['a[href]', 'href'],
     ['link[href]', 'href'],
     ['form[action]', 'action'],
@@ -791,7 +1040,7 @@ export function processContent(content, targetURL, rule, globalBlockPatterns = [
     applyBlockJsInline(document, currentRule.blockJsInline, targetURL);
   }
 
-  applyJSONContentExtraction(document, currentRule.contentExtraction);
+  applyJSONContentExtraction(document, currentRule.contentExtraction, options);
   applyArchiveFallback(document, targetURL, currentRule.archiveFallback, options.archiveHTML, options.archiveURL);
 
   applyCsCode(document, currentRule.csCode);
@@ -804,13 +1053,6 @@ export function processContent(content, targetURL, rule, globalBlockPatterns = [
 
   applyInjectionsToDocument(document, currentRule.injections);
   applyExternalLink(document, targetURL, currentRule.externalLink);
-
-  if (currentRule.clearStorage) {
-    const head = document.querySelector('head');
-    if (head) {
-      head.insertAdjacentHTML('afterbegin', '<script>localStorage.clear();sessionStorage.clear()</script>');
-    }
-  }
 
   let serialized;
   try {

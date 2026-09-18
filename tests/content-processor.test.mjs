@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { processContent } from '../src/runtime/content-processor.js';
+import {
+  findAmpRedirectURL,
+  getJSONExtractionRequest,
+  processContent,
+} from '../src/runtime/content-processor.js';
 
 test('applies nested BPC cs_code operations', () => {
   const html = '<html><head></head><body><article id="locked"><div class="body gated">Text</div></article></body></html>';
@@ -21,6 +25,76 @@ test('applies nested BPC cs_code operations', () => {
 
   assert.match(result.content, /class="body"/);
   assert.doesNotMatch(result.content, /gated/);
+});
+
+test('applies nested cs_code operations document-wide and splits attributes', () => {
+  const html = '<html class="locked" style="overflow:hidden"><body><div class="paywall"></div><article class="gated dim">Text</article></body></html>';
+  const result = processContent(
+    html,
+    'https://example.com/story',
+    {
+      csCode: [
+        {
+          cond: '.paywall',
+          rm_elem: true,
+          elems: [
+            { cond: 'article', rm_class: 'gated|dim' },
+            { cond: 'html', rm_attrib: 'class|style' },
+          ],
+        },
+      ],
+    },
+    [],
+  );
+
+  assert.doesNotMatch(result.content, /paywall|gated|dim|overflow:hidden/);
+});
+
+test('resolves an AMP redirect only when its paywall is present', () => {
+  const html = '<html><head><link rel="amphtml" href="/story/amp"></head><body><div class="paywall"></div></body></html>';
+  assert.equal(
+    findAmpRedirectURL(html, 'https://example.com/story', '.paywall'),
+    'https://example.com/story/amp',
+  );
+  assert.equal(findAmpRedirectURL(html, 'https://example.com/story', '.missing'), '');
+});
+
+test('rebuilds article content from page-source JSON', () => {
+  const html = `<html><head><script>var article = {"content":"<p>Recovered <b>article</b></p>"};</script></head><body><div class="paywall"></div><article>Preview</article></body></html>`;
+  const result = processContent(
+    html,
+    'https://example.com/story',
+    { contentExtraction: { ldJsonSource: '.paywall|article|var article=|content' } },
+    [],
+  );
+
+  assert.match(result.content, /Recovered <b>article<\/b>/);
+  assert.doesNotMatch(result.content, /Preview|paywall/);
+});
+
+test('discovers and applies a same-origin JSON article endpoint', () => {
+  const html = '<html><head><link rel="alternate" type="application/json" href="/wp-json/wp/v2/posts/12"></head><body><div class="paywall"></div><article>Preview</article></body></html>';
+  const extraction = { ldJsonUrl: '.paywall|article' };
+  assert.deepEqual(getJSONExtractionRequest(html, 'https://example.com/story', extraction), {
+    url: 'https://example.com/wp-json/wp/v2/posts/12',
+  });
+
+  const result = processContent(html, 'https://example.com/story', { contentExtraction: extraction }, [], {
+    jsonURLPayload: JSON.stringify({
+      content: { rendered: '<p onclick="steal()">Full text</p><script>steal()</script>' },
+    }),
+  });
+  assert.match(result.content, /Full text/);
+  assert.doesNotMatch(result.content, /Preview|onclick|steal\(\)|paywall/);
+});
+
+test('unhides generic AMP content and converts AMP media elements', () => {
+  const html = '<html><body><div subscriptions-section="content-not-granted">Preview</div><article subscriptions-section="content"><p amp-access-hide>Full</p><amp-img src="/image.jpg"></amp-img><amp-iframe src="/video"></amp-iframe></article></body></html>';
+  const result = processContent(html, 'https://example.com/story/amp', { ampUnhide: true }, []);
+
+  assert.doesNotMatch(result.content, /Preview|amp-access-hide|subscriptions-section|<amp-/);
+  assert.match(result.content, /<img src="\/https:\/\/example.com\/image.jpg">/);
+  assert.match(result.content, /<iframe[^>]+src="\/https:\/\/example.com\/video"/);
 });
 
 test('honors excluded domains for global block script rules', () => {

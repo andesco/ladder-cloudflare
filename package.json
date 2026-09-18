@@ -5,8 +5,10 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
+    "build:bpc-scripts": "node scripts/build-bpc-scripts.mjs",
     "build:rules": "node scripts/build-rules.js",
-    "build": "npm run build:rules",
+    "build": "npm run build:bpc-scripts && npm run build:rules",
+    "compare:refresh-candidates": "node scripts/compare-refresh-candidates.mjs",
     "deploy": "npm run build && wrangler deploy",
     "deploy:local": "npm run build && wrangler deploy --config wrangler.local.jsonc",
     "dev": "wrangler dev",
@@ -23,10 +25,11 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "@cloudflare/puppeteer": "^1.3.0",
     "linkedom": "^0.18.12"
   },
   "devDependencies": {
-    "wrangler": "^4.36.0",
+    "wrangler": "^4.119.0",
     "yaml": "^2.8.1"
   }
 }

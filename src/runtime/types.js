@@ -45,6 +45,8 @@
  * @typedef {{
  *   domain?: string,
  *   domains?: string[],
+ *   global?: boolean,
+ *   bpc?: boolean,
  *   paths?: string[],
  *   pathExclusions?: string[],
  *   headers?: Record<string, string>,
@@ -59,8 +61,13 @@
  *   excludedDomains?: string[],
  *   csCode?: CsCodeOp[],
  *   ampUnhide?: boolean,
+ *   ampRedirect?: string,
  *   blockJsInline?: string,
- *   clearStorage?: boolean,
+ *   csParam?: Record<string, any>,
+ *   csBlock?: boolean,
+ *   csClearLocalStorage?: boolean,
+ *   csAllFrames?: boolean,
+ *   allowCookies?: boolean,
  *   extraHeaders?: Record<string, string>
  * }} Rule
  */
