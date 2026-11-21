@@ -32,6 +32,8 @@ wrangler deploy
 
 ## Configuration
 
+`wrangler.jsonc` is a public template with placeholder values (`example.com` domains, `your-kv-namespace-id`). Keep your real account ID, routes, manifest URL and KV namespace ID in `wrangler.local.jsonc`, which is gitignored and local-only. Deploy with `npm run deploy:local`. Do not commit real values to `wrangler.jsonc`.
+
 Set these in `wrangler.jsonc` or Cloudflare dashboard:
 
 - `CONFIG_KV` (required): KV namespace binding for ruleset state

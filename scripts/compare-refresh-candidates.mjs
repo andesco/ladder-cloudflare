@@ -4,18 +4,16 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import { parseHTML } from 'linkedom';
 
-const DEFAULT_WORKER_URL = 'https://ladderflare.example.workers.dev';
 const DEFAULT_AUDIT_PATH = new URL('../documentation/bpc-kitesurf-compatibility-gap-audit.md', import.meta.url);
-const DEFAULT_RULESET_URL = `${DEFAULT_WORKER_URL}/ruleset`;
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 20_000;
 const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131.0 Safari/537.36';
 
 function parseArgs(argv) {
   const options = {
-    workerURL: process.env.WORKER_URL || DEFAULT_WORKER_URL,
+    workerURL: process.env.WORKER_URL || '',
     auditPath: process.env.AUDIT_PATH || DEFAULT_AUDIT_PATH,
-    rulesetURL: process.env.RULESET_URL || DEFAULT_RULESET_URL,
+    rulesetURL: process.env.RULESET_URL || '',
     concurrency: Number(process.env.CONCURRENCY || 2),
   };
 
@@ -26,15 +24,22 @@ function parseArgs(argv) {
     else if (arg === '--ruleset') options.rulesetURL = argv[++index];
     else if (arg === '--concurrency') options.concurrency = Number(argv[++index]);
     else if (arg === '--help') {
-      console.log('Usage: node scripts/compare-refresh-candidates.mjs [--worker URL] [--audit PATH] [--ruleset URL] [--concurrency N]');
+      console.log('Usage: node scripts/compare-refresh-candidates.mjs --worker URL [--audit PATH] [--ruleset URL] [--concurrency N]');
       process.exit(0);
     }
+  }
+
+  if (!options.workerURL) {
+    console.error('Error: the Worker URL is required. Pass --worker https://your-worker.example.com or set WORKER_URL.');
+    console.error('Usage: node scripts/compare-refresh-candidates.mjs --worker URL [--audit PATH] [--ruleset URL] [--concurrency N]');
+    process.exit(1);
   }
 
   options.concurrency = Number.isFinite(options.concurrency) && options.concurrency > 0
     ? Math.min(Math.floor(options.concurrency), 4)
     : 2;
   options.workerURL = options.workerURL.replace(/\/$/, '');
+  options.rulesetURL = options.rulesetURL || `${options.workerURL}/ruleset`;
   return options;
 }
 

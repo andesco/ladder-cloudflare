@@ -15,6 +15,7 @@ dist/
 build/
 package/
 wrangler.local.toml
+wrangler.local.jsonc
 
 # Environment Variables
 .env
