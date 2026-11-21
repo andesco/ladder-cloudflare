@@ -1,4 +1,4 @@
-# BPC/Kitesurf browser-first implementation
+# Kitesurf browser-first implementation
 
 Snapshot: 2026-08-06  
 Repository: [`ladder-cloudflare`](../)  
@@ -11,7 +11,7 @@ Ladderflare now routes ordinary target requests to Kitesurf by default. FastHTTP
 
 | Route | Behavior |
 | --- | --- |
-| `/{URL}` | BPC + Ladder Kitesurf browser rendering |
+| `/{URL}` | Upstream + Ladder Kitesurf browser rendering |
 | `/browser/{URL}` | Explicit alias for the browser route |
 | `/fast/{URL}` | Explicit FastHTTP/server-side rules route |
 | `/api/{URL}` | Kitesurf inspection payload with rendered body + browser request/response headers |
@@ -19,7 +19,7 @@ Ladderflare now routes ordinary target requests to Kitesurf by default. FastHTTP
 | `/fast/api/{URL}` | Explicit FastHTTP inspection payload |
 | `/fast/raw/{URL}` | Explicit FastHTTP unmodified diagnostic fetch |
 
-The root form has one mode: BPC + Ladder browser rendering. The FastHTTP route is intentionally not presented as a normal UI option.
+The root form has one mode: Upstream + Ladder browser rendering. The FastHTTP route is intentionally not presented as a normal UI option.
 
 ## Compatibility gate
 
@@ -29,8 +29,8 @@ The current live merged ruleset has 1,399 unique domains. The four audit categor
 
 | Gate reason | Domains in category | Meaning |
 | --- | ---: | --- |
-| `refresh` | 42 | BPC can request a second navigation, but the adapter does not restart Kitesurf yet |
-| `language-dispatch` | 10 | The selected local BPC language script differs from the extension dispatcher |
+| `refresh` | 42 | Upstream can request a second navigation, but the adapter does not restart Kitesurf yet |
+| `language-dispatch` | 10 | The selected local upstream language script differs from the extension dispatcher |
 | `cookie-clear` | 3 | `clear_cookies_domain` is not implemented in the browser shim |
 | `all-frames` | 2 | The browser can mutate frames, but the Worker serializes the main frame only |
 
@@ -38,7 +38,7 @@ The category counts are not additive because `lastampa.it`, `historytoday.com`, 
 
 ## 42-domain comparison
 
-The comparison was run against the pre-gate production `/browser/` route so it measured the implementation rather than the new `501` response. Regular fetch means a direct origin fetch with no Ladderflare rules. Kitesurf means the production browser route with the active BPC + Ladder rules.
+The comparison was run against the pre-gate production `/browser/` route so it measured the implementation rather than the new `501` response. Regular fetch means a direct origin fetch with no Ladderflare rules. Kitesurf means the production browser route with the active upstream + Ladder rules.
 
 | Measurement | Result |
 | --- | ---: |

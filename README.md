@@ -4,7 +4,7 @@
 
 <h1 align="center">Ladderflare</h1>
 
-Ladderflare is a Cloudflare Worker proxy that applies BPC-derived rules with Ladder YAML overlays at the edge.
+Ladderflare is a Cloudflare Worker proxy that applies upstream-derived rules with Ladder YAML overlays at the edge.
 
 ## Runtime Model
 
@@ -49,8 +49,8 @@ Set these in `wrangler.jsonc` or Cloudflare dashboard:
 
 ## Endpoints
 
-- `GET /`: input form for BPC + Ladder browser rendering
-- `GET /{URL}`: BPC + Ladder Kitesurf-rendered response (the default route)
+- `GET /`: input form for upstream + Ladder browser rendering
+- `GET /{URL}`: Upstream + Ladder Kitesurf-rendered response (the default route)
 - `GET /fast/{URL}`: explicit FastHTTP response with server-side rule processing
 - `GET /raw/{URL}`: Kitesurf-rendered response using the raw route format
 - `GET /api/{URL}`: JSON payload from the Kitesurf path with rendered body + request/response headers
@@ -88,16 +88,16 @@ Deprecated endpoints:
    - `injections`
    - external article links (`externalLink`)
 
-## BPC Compatibility Boundary
+## Upstream Compatibility Boundary
 
-The explicit `/fast/` route and `/fast/api/` route map all generic server-compatible fields in the upstream aggregated ruleset, including request headers, URL/request blocking, selective cookie removal, `cs_code`, AMP redirect/unhide, all four JSON extraction forms, archive fallback, and external links. `/fast/raw/` is the unmodified FastHTTP diagnostic route. The default route, `/browser/`, `/api/`, and `/raw/` use Browser Run Kitesurf through CDP to execute the selected rule's early injections, run the matching vendored BPC `contentScript.js` + language-specific `cs_local` file, bridge BPC external-fetch messages through the Worker, and apply mapped DOM operations after navigation.
+The explicit `/fast/` route and `/fast/api/` route map all generic server-compatible fields in the upstream aggregated ruleset, including request headers, URL/request blocking, selective cookie removal, `cs_code`, AMP redirect/unhide, all four JSON extraction forms, archive fallback, and external links. `/fast/raw/` is the unmodified FastHTTP diagnostic route. The default route, `/browser/`, `/api/`, and `/raw/` use Browser Run Kitesurf through CDP to execute the selected rule's early injections, run the matching vendored upstream `contentScript.js` + language-specific `cs_local` file, bridge upstream external-fetch messages through the Worker, and apply mapped DOM operations after navigation.
 
 Kitesurf routes are fail-closed for the current compatibility audit. They return `501 browser_compatibility_gap` for the 54-domain union covering refresh/reload semantics, language-dispatch mismatches, cookie-domain clearing, and main-frame-only serialization. `/fast/` and `/fast/api/` are subject to the same gate; `/fast/raw/` remains an unmodified diagnostic fetch.
 
 The browser route now preserves and consumes these extension fields:
 
-- `cs_param`: passed to the selected BPC `cs_local` script instead of being mistaken for origin request headers.
-- `cs_block`: prevents the local script from running while retaining generic BPC operations.
+- `cs_param`: passed to the selected upstream `cs_local` script instead of being mistaken for origin request headers.
+- `cs_block`: prevents the local script from running while retaining generic upstream operations.
 - `cs_clear_lclstrg`: clears only the disposable Kitesurf page's local/session storage.
 - `cs_all_frames`: document-start CDP injection reaches frames in the browser target; post-navigation DOM serialization is still main-frame HTML.
 - `allow_cookies`: the isolated browser session preserves its own cookies; it never exposes the caller's browser cookie jar.
@@ -106,8 +106,8 @@ The following Chrome-extension behavior remains intentionally bounded:
 
 - `block_host_perm_add`: Chrome host-permission metadata; Workers do not use browser permissions.
 - `upd_version` and `nofix`: upstream metadata, not executable rules.
-- Extension lifecycle APIs are shimmed only for the operations used by BPC content scripts: runtime messaging, storage, cookies, tabs, scripting, permissions, and request-rule events. `getExtFetch`/`getExtSrc` are bridged through a Worker-side fetch when Puppeteer exposes the binding; unsupported operations become observable no-ops in `window.__ladderflareBpc`.
-- The vendored `cs_local` snapshot does not make Kitesurf a native extension host. Updates to BPC's extension source require refreshing `src/vendor/bpc` and regenerating the bundle.
+- Extension lifecycle APIs are shimmed only for the operations used by upstream content scripts: runtime messaging, storage, cookies, tabs, scripting, permissions, and request-rule events. `getExtFetch`/`getExtSrc` are bridged through a Worker-side fetch when Puppeteer exposes the binding; unsupported operations become observable no-ops in `window.__ladderflareBpc`.
+- The vendored `cs_local` snapshot does not make Kitesurf a native extension host. Updates to upstream's extension source require refreshing `src/vendor/bpc` and regenerating the bundle.
 
 `cs_dompurify` is not mapped as a switch because extracted HTML is always sanitized by the Worker.
 
@@ -125,8 +125,8 @@ npm run dev:local
 
 ## Documentation
 
-- [BPC/Kitesurf browser-first implementation](documentation/bpc-kitesurf-browser-first-implementation.md)
-- [BPC/Kitesurf compatibility-gap audit](documentation/bpc-kitesurf-compatibility-gap-audit.md)
+- [Kitesurf browser-first implementation](documentation/kitesurf-browser-first-implementation.md)
+- [Kitesurf compatibility-gap audit](documentation/kitesurf-compatibility-gap-audit.md)
 
 ## Notes
 
