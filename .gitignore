@@ -9,6 +9,7 @@ yarn-error.log*
 
 # Cloudflare
 .wrangler/
+.cloudflare/
 .dev.vars
 .dev.vars.*
 dist/
@@ -16,6 +17,7 @@ build/
 package/
 wrangler.local.toml
 wrangler.local.jsonc
+cloudflare.local.config.ts
 
 # Environment Variables
 .env
@@ -56,3 +58,6 @@ output/
 
 # Local BPC input (kept out of git; required for build:rules)
 sites_aggregated.js
+
+# Private local-only files (test URLs, generated rulesets)
+local/

@@ -11,7 +11,7 @@ Ladderflare is a Cloudflare Worker proxy that applies upstream-derived rules wit
 - Pure JavaScript Worker runtime (no Go, no WebAssembly).
 - Rules are loaded from KV at runtime (`CONFIG_KV`).
 - Scheduled updates fetch `manifest.json`, map `sites_aggregated.js`, merge in Ladder YAML overlays, and store the merged rules in KV.
-- Local builds use `MANIFEST_URL` or the `MANIFEST_URL` value in `wrangler.jsonc`; set `SOURCE_FILE=/path/to/sites_aggregated.json` for offline builds.
+- Local builds use `MANIFEST_URL` or its value in `cloudflare.config.ts`; set `SOURCE_FILE=/path/to/sites_aggregated.json` for offline builds.
 
 ## Deploy
 
@@ -27,14 +27,21 @@ git clone https://github.com/andesco/ladderflare.git
 cd ladderflare
 npm install
 npm run build
-wrangler deploy
+npm run deploy
 ```
+
+Use Node.js 22.18 or later for the Cloudflare CLI.
 
 ## Configuration
 
-`wrangler.jsonc` is a public template with placeholder values (`example.com` domains, `your-kv-namespace-id`). Keep your real account ID, routes, manifest URL and KV namespace ID in `wrangler.local.jsonc`, which is gitignored and local-only. Deploy with `npm run deploy:local`. Do not commit real values to `wrangler.jsonc`.
+`cloudflare.config.ts` (used by the `cf` CLI) and `wrangler.jsonc` (used by Wrangler) are public templates with placeholder values (`example.com` domains, `your-kv-namespace-id`). Do not commit real values to them. Keep your real account ID, domains, manifest URL and KV namespace ID in gitignored, local-only files:
 
-Set these in `wrangler.jsonc` or Cloudflare dashboard:
+- `cloudflare.local.config.ts`: same default export as `cloudflare.config.ts`. When it exists, `cf deploy` and `cf dev` use it instead of the template. Only a missing file is ignored; an error inside it stops the command.
+- `wrangler.local.jsonc`: used by `npm run deploy:local` and `npm run dev:local`.
+
+Private test files (generated rulesets, test URLs) go in the gitignored `local/` folder.
+
+Set these in `cloudflare.config.ts` (or your `cloudflare.local.config.ts`) or the Cloudflare dashboard:
 
 - `CONFIG_KV` (required): KV namespace binding for ruleset state
 - `BROWSER` (required for the default route): Browser Run binding used by the Kitesurf CDP renderer

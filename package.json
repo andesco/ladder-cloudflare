@@ -9,9 +9,9 @@
     "build:rules": "node scripts/build-rules.js",
     "build": "npm run build:bpc-scripts && npm run build:rules",
     "compare:refresh-candidates": "node scripts/compare-refresh-candidates.mjs",
-    "deploy": "npm run build && wrangler deploy",
+    "deploy": "npm run build && cf deploy",
     "deploy:local": "npm run build && wrangler deploy --config wrangler.local.jsonc",
-    "dev": "wrangler dev",
+    "dev": "cf dev",
     "dev:local": "wrangler dev --local --config wrangler.local.jsonc",
     "test": "node --test tests/*.test.mjs"
   },
@@ -29,7 +29,8 @@
     "linkedom": "^0.18.12"
   },
   "devDependencies": {
-    "wrangler": "^4.119.0",
+    "cf": "^1.0.0-beta.5",
+    "wrangler": "^4.144.0",
     "yaml": "^2.8.1"
   }
 }
